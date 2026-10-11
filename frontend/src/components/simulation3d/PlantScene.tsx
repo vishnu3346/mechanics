@@ -14,6 +14,7 @@ import { FeedPump } from './FeedPump'
 import { TurbineUnit } from './TurbineUnit'
 import { HeatExchangerUnit } from './HeatExchangerUnit'
 import { ProcessPipes } from './ProcessPipes'
+import { getPalette } from './palette'
 
 export function PlantScene({
   data,
@@ -21,12 +22,14 @@ export function PlantScene({
   paused,
   reducedMotion,
   cameraPreset,
+  theme = 'dark',
   onSelectComponent,
   selectedComponent,
 }: PlantSceneProps) {
   const controlsRef = useRef<any>(null)
   const [lowQuality, setLowQuality] = useState(false)
   const frameTimes = useRef<number[]>([])
+  const p = getPalette(theme)
 
   // Adaptive Quality Monitor: tracks rolling FPS, activates lowDetail mode if laptop fps drops < 42
   useFrame((_, delta) => {
@@ -67,8 +70,8 @@ export function PlantScene({
 
   return (
     <>
-      <color attach="background" args={['#050811']} />
-      <fog attach="fog" args={['#050811', 22, 54]} />
+      <color attach="background" args={[p.background]} />
+      <fog attach="fog" args={[p.fog, 22, 58]} />
 
       <PerspectiveCamera makeDefault position={[1.0, 7.5, 19.5]} fov={42} />
       <OrbitControls
@@ -77,35 +80,46 @@ export function PlantScene({
         dampingFactor={0.08}
         minDistance={4}
         maxDistance={42}
-        maxPolarAngle={Math.PI / 2 - 0.04} // Prevent camera going underneath the ground
+        maxPolarAngle={Math.PI / 2 - 0.04} // Prevent camera going underneath ground
       />
 
       <CameraController preset={cameraPreset} controlsRef={controlsRef} />
 
-      {/* ── Realistic PBR Industrial Lighting ─────────────────────── */}
-      <ambientLight intensity={0.7} />
+      {/* ── Theme-Responsive Industrial PBR Lighting ──────────────── */}
+      <ambientLight color={p.lighting.ambientColor} intensity={p.lighting.ambientIntensity} />
       <directionalLight
-        position={[14, 22, 16]}
-        intensity={1.25}
+        position={p.lighting.sunPosition}
+        color={p.lighting.sunColor}
+        intensity={p.lighting.sunIntensity}
         castShadow={!lowQuality}
         shadow-mapSize={[1024, 1024]}
         shadow-camera-near={0.5}
         shadow-camera-far={60}
-        shadow-camera-left={-22}
-        shadow-camera-right={22}
-        shadow-camera-top={22}
-        shadow-camera-bottom={-22}
+        shadow-camera-left={-24}
+        shadow-camera-right={24}
+        shadow-camera-top={24}
+        shadow-camera-bottom={-24}
       />
-      <directionalLight position={[-12, 16, -10]} intensity={0.45} />
+      {/* Crisp Rim Light (prominent in dark theme for silhouette definition) */}
+      <directionalLight
+        position={p.lighting.rimPosition}
+        color={p.lighting.rimColor}
+        intensity={p.lighting.rimIntensity}
+      />
+      {/* Front-right fill light */}
+      <directionalLight position={[-8, 12, 10]} intensity={p.lighting.fillIntensity} />
 
       {/* Local Equipment Accent Point Lights */}
-      <pointLight position={[-4.5, 3.8, 2.5]} intensity={1.4} color="#f59e0b" distance={14} />
-      <pointLight position={[3.0, 3.8, 2.5]} intensity={1.1} color="#38bdf8" distance={12} />
-      <pointLight position={[9.4, 3.0, 2.5]} intensity={1.1} color="#60a5fa" distance={12} />
-      <pointLight position={[14.4, 2.8, 2.5]} intensity={1.0} color="#34d399" distance={12} />
+      <pointLight position={[-4.5, 3.8, 2.5]} intensity={theme === 'dark' ? 1.4 : 0.6} color="#f59e0b" distance={14} />
+      <pointLight position={[3.0, 3.8, 2.5]} intensity={theme === 'dark' ? 1.1 : 0.5} color="#10b981" distance={12} />
+      <pointLight position={[9.4, 3.0, 2.5]} intensity={theme === 'dark' ? 1.1 : 0.5} color="#38bdf8" distance={12} />
+      <pointLight position={[14.4, 2.8, 2.5]} intensity={theme === 'dark' ? 1.0 : 0.4} color="#34d399" distance={12} />
 
       {/* ── Industrial Facility Structure & Equipment ─────────────── */}
-      <PlantInfrastructure />
+      <PlantInfrastructure
+        theme={theme}
+        onSelectComponent={onSelectComponent}
+      />
 
       <ConveyorFeedLine
         wasteFeedKgH={wasteFeedKgH}
@@ -113,6 +127,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'feed_line'}
       />
@@ -122,6 +137,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'gasifier'}
       />
@@ -137,6 +153,7 @@ export function PlantScene({
         u0_m_s={u0_m_s}
         umf_eff_m_s={umf_eff_m_s}
         lowDetail={lowQuality}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'gasifier'}
       />
@@ -145,6 +162,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
       />
 
@@ -153,11 +171,13 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'boiler'}
       />
 
       <FeedPump
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'boiler'}
       />
@@ -167,6 +187,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'turbine'}
       />
@@ -176,6 +197,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
         onSelectComponent={onSelectComponent}
         selected={selectedComponent === 'heat_exchanger'}
       />
@@ -187,6 +209,7 @@ export function PlantScene({
         running={running}
         paused={paused}
         reducedMotion={reducedMotion}
+        theme={theme}
       />
     </>
   )

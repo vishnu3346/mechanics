@@ -1,8 +1,8 @@
 import React from 'react'
 import * as THREE from 'three'
-import { UnitLabel } from './Labels'
 
 interface FeedPumpProps {
+  theme?: 'light' | 'dark'
   onSelectComponent?: (comp: string) => void
   selected?: boolean
 }
@@ -76,18 +76,6 @@ export function FeedPump({ onSelectComponent, selected }: FeedPumpProps) {
         <boxGeometry args={[0.16, 0.14, 0.16]} />
         <meshStandardMaterial color="#3b82f6" metalness={0.6} roughness={0.3} />
       </mesh>
-
-      {/* Unit Label with Leader Line */}
-      <UnitLabel
-        position={[0, 1.85, 0]}
-        targetPosition={[0, 0.6, 0]}
-        title="BOILER FEED PUMP"
-        subtitle="16 bar Multistage BFW Supply"
-        tag="AUX PUMP"
-        tagColor="#38bdf8"
-        accentColor="#0284c7"
-        onClick={() => onSelectComponent?.('boiler')}
-      />
     </group>
   )
 }

@@ -1,8 +1,7 @@
 import { useRef, useState, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { Html } from '@react-three/drei'
 import * as THREE from 'three'
-import { UnitLabel } from './Labels'
+import { UnitTag, SelectionOutlineRing } from './Labels'
 
 interface ParcelData {
   id: number
@@ -24,6 +23,7 @@ interface ConveyorFeedLineProps {
   running: boolean
   paused: boolean
   reducedMotion: boolean
+  theme?: 'light' | 'dark'
   onSelectComponent?: (comp: string) => void
   selected?: boolean
 }
@@ -206,12 +206,11 @@ export function ConveyorFeedLine({
 
   return (
     <group onClick={(e) => { e.stopPropagation(); onSelectComponent?.('feed_line'); }}>
-      {/* Selection Highlight */}
+      {/* Selection Highlight Outline */}
       {selected && (
-        <mesh position={[-10.5, 0.01, 0.5]} rotation={[-Math.PI / 2, 0, 0]}>
-          <planeGeometry args={[6.5, 2.0]} />
-          <meshBasicMaterial color="#38bdf8" wireframe />
-        </mesh>
+        <group position={[-10.5, 0, 0.5]}>
+          <SelectionOutlineRing radius={2.2} color="#0284c7" />
+        </group>
       )}
 
       {/* ── 1. Conveyor Belt Assembly (Continuous) ──────────────── */}
@@ -382,20 +381,11 @@ export function ConveyorFeedLine({
             {/* Glowing YOLO Bounding Box & Class Tag When Under Scanner */}
             {isScanningNow && (
               <group position={[0, 0, 0]}>
-                {/* 3D Wireframe Bounding Box */}
+                {/* 3D Wireframe Bounding Box Under Active Scanner */}
                 <mesh>
                   <boxGeometry args={[p.size[0] * 1.35, p.size[1] * 1.35, p.size[2] * 1.35]} />
                   <meshBasicMaterial color="#38bdf8" wireframe />
                 </mesh>
-
-                {/* Floating Optical Classification Tag */}
-                <Html position={[0, p.size[1] + 0.35, 0]} center distanceFactor={14}>
-                  <div className="px-2 py-0.5 rounded bg-cyan-950/90 border border-cyan-400 text-[10px] font-mono font-bold text-cyan-200 whitespace-nowrap shadow-md backdrop-blur-md flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-                    <span>{p.className}</span>
-                    <span className="text-cyan-400 font-extrabold">{p.confidence}%</span>
-                  </div>
-                </Html>
               </group>
             )}
           </group>
@@ -470,24 +460,15 @@ export function ConveyorFeedLine({
         </group>
       </group>
 
-      {/* ── 6. Labels with Thin Leader Lines (Staggered Heights) ── */}
-      <UnitLabel
-        position={[-11.5, 3.6, 0.5]}
-        targetPosition={[-11.5, 0.88, 0.5]}
-        title="SORTING CONVEYOR"
-        subtitle={`Feed: ${wasteFeedKgH.toFixed(0)} kg/h · Plastic: ${(plasticRatio * 100).toFixed(0)}%`}
-        schematic
+      {/* ── 6. Decluttered Unit Tag (Clean Scene, Details on Click) ── */}
+      <UnitTag
+        position={[-10.5, 3.2, 0.5]}
+        targetPosition={[-10.5, 1.2, 0.5]}
+        unitNumber={1}
+        name="Feed Line"
+        headline={`${wasteFeedKgH.toFixed(0)} kg/h`}
         accentColor="#0284c7"
-        onClick={() => onSelectComponent?.('feed_line')}
-      />
-
-      <UnitLabel
-        position={[-9.5, 4.4, 0.5]}
-        targetPosition={[-10.5, 2.4, 0.5]}
-        title="AI OPTICAL SCANNER"
-        subtitle="schematic: not live YOLO output"
-        schematic
-        accentColor="#06b6d4"
+        selected={selected}
         onClick={() => onSelectComponent?.('feed_line')}
       />
     </group>

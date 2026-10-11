@@ -37,7 +37,7 @@ const NAV_ITEMS = [
 ]
 
 function AppLayout() {
-  const { theme, toggleTheme } = useTheme()
+  const { theme, resolvedTheme, toggleTheme } = useTheme()
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-[#090d16] text-slate-900 dark:text-slate-100 font-sans transition-colors duration-150">
@@ -128,19 +128,21 @@ function AppLayout() {
             onClick={toggleTheme}
             id="theme-toggle-btn"
             className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 hover:bg-slate-200/80 dark:hover:bg-white/10 transition-colors text-xs font-semibold text-slate-800 dark:text-slate-200 shadow-xs cursor-pointer"
-            title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
+            title={`Switch Theme (Current: ${theme.toUpperCase()}, Mode: ${resolvedTheme})`}
           >
             <div className="flex items-center gap-2">
-              {theme === 'dark' ? (
+              {resolvedTheme === 'dark' ? (
                 <Moon size={15} className="text-cyan-400" />
               ) : (
                 <Sun size={15} className="text-amber-500" />
               )}
-              <span>{theme === 'dark' ? 'Dark Aesthetics' : 'Light Aesthetics'}</span>
+              <span>
+                {theme === 'system' ? 'System Theme' : theme === 'dark' ? 'Dark Aesthetics' : 'Light Aesthetics'}
+              </span>
             </div>
             <span
               className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded font-bold border ${
-                theme === 'dark'
+                resolvedTheme === 'dark'
                   ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/30'
                   : 'bg-amber-100 text-amber-800 border-amber-300'
               }`}
@@ -151,7 +153,7 @@ function AppLayout() {
 
           <div className="px-2 pt-1 text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 font-mono">
             <Radio size={11} className="text-emerald-500 shrink-0" />
-            <span>Fluidized Bed Twin Online</span>
+            <span>Process Twin Online</span>
           </div>
         </div>
       </nav>
@@ -169,7 +171,7 @@ function AppLayout() {
                 fallback={
                   <div className="h-full flex items-center justify-center bg-slate-950 text-cyan-400 font-mono text-sm gap-3 p-8">
                     <span className="w-3 h-3 rounded-full bg-cyan-400 animate-ping" />
-                    <span>Loading 3D Digital Twin Viewport...</span>
+                    <span>Loading 3D Plant Process Simulator Viewport...</span>
                   </div>
                 }
               >

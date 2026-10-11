@@ -1,13 +1,14 @@
 import { useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { UnitLabel } from './Labels'
+import { getPalette } from './palette'
 
 interface AirBlowerProps {
   airflowM3H: number
   running: boolean
   paused: boolean
   reducedMotion: boolean
+  theme?: 'light' | 'dark'
   onSelectComponent?: (comp: string) => void
   selected?: boolean
 }
@@ -17,11 +18,13 @@ export function AirBlower({
   running,
   paused,
   reducedMotion,
+  theme = 'dark',
   onSelectComponent,
   selected,
 }: AirBlowerProps) {
   const impellorRef = useRef<THREE.Group>(null)
   const particlesRef = useRef<THREE.Group>(null)
+  const p = getPalette(theme)
 
   // Speed scaled by airflow (nominal 661 Nm³/h)
   const effectiveAirflow = Math.max(100, airflowM3H || 661)
@@ -125,12 +128,12 @@ export function AirBlower({
         {/* Vertical drop */}
         <mesh position={[0, -0.4, 0]}>
           <cylinderGeometry args={[0.11, 0.11, 0.6, 14]} />
-          <meshStandardMaterial color="#475569" metalness={0.7} roughness={0.3} />
+          <meshStandardMaterial color={p.pipes.combustionAir} metalness={0.7} roughness={0.3} />
         </mesh>
         {/* Elbow & Horizontal pipe forward */}
         <mesh position={[0.45, -0.7, 0.9]} rotation={[Math.PI / 2, Math.PI / 4, 0]}>
           <cylinderGeometry args={[0.1, 0.1, 1.8, 14]} />
-          <meshStandardMaterial color="#475569" metalness={0.7} roughness={0.3} />
+          <meshStandardMaterial color={p.pipes.combustionAir} metalness={0.7} roughness={0.3} />
         </mesh>
 
         {/* Air Flow Particles */}
@@ -138,23 +141,11 @@ export function AirBlower({
           {Array.from({ length: 5 }).map((_, i) => (
             <mesh key={i} position={[i * 0.45, 0, i * 0.35]}>
               <sphereGeometry args={[0.045, 6, 6]} />
-              <meshStandardMaterial color="#38bdf8" emissive="#0284c7" emissiveIntensity={0.8} />
+              <meshStandardMaterial color={p.pipes.combustionAir} emissive={p.pipes.combustionAir} emissiveIntensity={0.8} />
             </mesh>
           ))}
         </group>
       </group>
-
-      {/* Unit Label with Leader Line */}
-      <UnitLabel
-        position={[0, 2.3, 0]}
-        targetPosition={[0, 0.8, 0]}
-        title="PRIMARY AIR BLOWER"
-        subtitle={`${effectiveAirflow.toFixed(1)} Nm³/h · Pressurized Draft`}
-        tag="AIR INTAKE"
-        tagColor="#38bdf8"
-        accentColor="#0284c7"
-        onClick={() => onSelectComponent?.('gasifier')}
-      />
     </group>
   )
 }

@@ -1,12 +1,12 @@
 import { useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { UnitLabel } from './Labels'
 
 interface CycloneAndStackProps {
   running: boolean
   paused: boolean
   reducedMotion: boolean
+  theme?: 'light' | 'dark'
   onSelectComponent?: (comp: string) => void
 }
 
@@ -14,6 +14,7 @@ export function CycloneAndStack({
   running,
   paused,
   reducedMotion,
+  theme = 'dark',
   onSelectComponent,
 }: CycloneAndStackProps) {
   const plumeRef = useRef<THREE.Group>(null)
@@ -93,17 +94,6 @@ export function CycloneAndStack({
             <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.3} />
           </mesh>
         ))}
-
-        {/* Cyclone Label (Marked Schematic) */}
-        <UnitLabel
-          position={[0, 3.1, 0]}
-          targetPosition={[0, 1.6, 0]}
-          title="CYCLONE SEPARATOR"
-          subtitle="Particulate fly-ash separation"
-          schematic
-          accentColor="#0ea5e9"
-          onClick={() => onSelectComponent?.('gasifier')}
-        />
       </group>
 
       {/* ── 2. Exhaust Flue Gas Stack (Schematic Post-Boiler) ───── */}
@@ -163,16 +153,6 @@ export function CycloneAndStack({
             </mesh>
           ))}
         </group>
-
-        {/* Stack Label (Marked Schematic) */}
-        <UnitLabel
-          position={[0, 7.3, 0]}
-          targetPosition={[0, 6.5, 0]}
-          title="EXHAUST STACK"
-          subtitle="Continuous Emission Monitoring (CEMS)"
-          schematic
-          accentColor="#64748b"
-        />
       </group>
     </group>
   )

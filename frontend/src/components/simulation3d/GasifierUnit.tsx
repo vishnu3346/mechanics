@@ -1,7 +1,8 @@
 import { useRef, useMemo } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
-import { UnitLabel, SubLabel } from './Labels'
+import { UnitTag, SelectionOutlineRing } from './Labels'
+import { getPalette } from './palette'
 
 // Temperature Margin Glow Evaluator (Retained from UI-2)
 export function getTemperatureColorAndIntensity(tempC: number): {
@@ -34,6 +35,7 @@ interface GasifierUnitProps {
   d_eff_m: number
   u0_m_s: number
   umf_eff_m_s: number
+  theme?: 'light' | 'dark'
   lowDetail?: boolean
   onSelectComponent?: (comp: string) => void
   selected?: boolean
@@ -54,6 +56,7 @@ export function GasifierUnit({
   d_eff_m,
   u0_m_s,
   umf_eff_m_s,
+  theme = 'dark',
   lowDetail = false,
   onSelectComponent,
   selected,
@@ -61,6 +64,7 @@ export function GasifierUnit({
   const glowRef = useRef<THREE.Mesh>(null)
   const particlesMeshRef = useRef<THREE.InstancedMesh>(null)
   const glowInfo = getTemperatureColorAndIntensity(temperature)
+  const p = getPalette(theme)
 
   const particleCount = lowDetail ? 800 : PARTICLE_COUNT
 
@@ -106,7 +110,7 @@ export function GasifierUnit({
   const bedHeightDisplay = DISTRIBUTOR_Y + STATIC_BED_H + bedExpansion
 
   useFrame((_, delta) => {
-    // 1. Glow pulsing
+    // 1. Core glow pulsing (ONLY inside hot cutaway interior)
     if (glowRef.current) {
       const mat = glowRef.current.material as THREE.MeshStandardMaterial
       const pulse = running && !paused && !reducedMotion ? Math.sin(Date.now() * 0.004) * 0.15 : 0
@@ -120,51 +124,51 @@ export function GasifierUnit({
     const u_excess = Math.max(0, u0_m_s - umf_eff_m_s)
     const currentBedTop = DISTRIBUTOR_Y + STATIC_BED_H + bedExpansion
 
-    particles.forEach((p, i) => {
+    particles.forEach((pState, i) => {
       if (activeDelta > 0) {
         if (u0_over_umf_eff < 1.0) {
           // REGIME 1: Static Packed Bed (U0 < Umf_eff)
-          p.y = Math.max(DISTRIBUTOR_Y + 0.02, Math.min(DISTRIBUTOR_Y + STATIC_BED_H * 0.8, p.y))
-          p.x += Math.sin(p.phase + Date.now() * 0.001) * 0.0004
-          p.z += Math.cos(p.phase + Date.now() * 0.001) * 0.0004
+          pState.y = Math.max(DISTRIBUTOR_Y + 0.02, Math.min(DISTRIBUTOR_Y + STATIC_BED_H * 0.8, pState.y))
+          pState.x += Math.sin(pState.phase + Date.now() * 0.001) * 0.0004
+          pState.z += Math.cos(pState.phase + Date.now() * 0.001) * 0.0004
         } else if (u0_over_umf_eff < 2.0) {
           // REGIME 2: Incipient Fluidization (1.0 <= U0/Umf_eff < 2.0)
-          p.y += Math.sin(Date.now() * 0.004 + p.phase) * activeDelta * 0.08
-          p.y = Math.max(DISTRIBUTOR_Y + 0.03, Math.min(currentBedTop, p.y))
+          pState.y += Math.sin(Date.now() * 0.004 + pState.phase) * activeDelta * 0.08
+          pState.y = Math.max(DISTRIBUTOR_Y + 0.03, Math.min(currentBedTop, pState.y))
         } else {
           // REGIME 3: Bubbling Fluidization (U0/Umf_eff >= 2.0)
-          const isCore = p.r < BED_RADIUS * 0.65
-          const wakeSpeed = (0.4 + u_excess * 0.8) * p.vy
+          const isCore = pState.r < BED_RADIUS * 0.65
+          const wakeSpeed = (0.4 + u_excess * 0.8) * pState.vy
 
           if (isCore) {
-            p.y += activeDelta * wakeSpeed
-            if (p.y > currentBedTop) {
-              p.y = currentBedTop
-              p.r = Math.min(BED_RADIUS * 0.95, p.r + 0.15)
-              const theta = Math.atan2(p.z, p.x)
-              p.x = p.r * Math.cos(theta)
-              p.z = p.r * Math.sin(theta)
+            pState.y += activeDelta * wakeSpeed
+            if (pState.y > currentBedTop) {
+              pState.y = currentBedTop
+              pState.r = Math.min(BED_RADIUS * 0.95, pState.r + 0.15)
+              const theta = Math.atan2(pState.z, pState.x)
+              pState.x = pState.r * Math.cos(theta)
+              pState.z = pState.r * Math.sin(theta)
             }
           } else {
-            p.y -= activeDelta * wakeSpeed * 0.7
-            if (p.y < DISTRIBUTOR_Y + 0.05) {
-              p.y = DISTRIBUTOR_Y + 0.05
-              p.r = Math.max(0.05, p.r - 0.2)
-              const theta = Math.atan2(p.z, p.x)
-              p.x = p.r * Math.cos(theta)
-              p.z = p.r * Math.sin(theta)
+            pState.y -= activeDelta * wakeSpeed * 0.7
+            if (pState.y < DISTRIBUTOR_Y + 0.05) {
+              pState.y = DISTRIBUTOR_Y + 0.05
+              pState.r = Math.max(0.05, pState.r - 0.2)
+              const theta = Math.atan2(pState.z, pState.x)
+              pState.x = pState.r * Math.cos(theta)
+              pState.z = pState.r * Math.sin(theta)
             }
           }
 
           // REGIME 4: Entrainment / Elutriation into Freeboard
           if (u0_over_ut > 0.45 && i % 8 === 0) {
-            p.y += activeDelta * (u0_over_ut * 1.5)
-            if (p.y > 3.8) p.y = DISTRIBUTOR_Y + 0.1
+            pState.y += activeDelta * (u0_over_ut * 1.5)
+            if (pState.y > 3.8) pState.y = DISTRIBUTOR_Y + 0.1
           }
         }
       }
 
-      dummy.position.set(p.x, p.y, p.z)
+      dummy.position.set(pState.x, pState.y, pState.z)
       dummy.scale.set(particleScale, particleScale, particleScale)
       dummy.updateMatrix()
       particlesMeshRef.current!.setMatrixAt(i, dummy.matrix)
@@ -179,13 +183,8 @@ export function GasifierUnit({
 
   return (
     <group position={[-4.5, 0, 0]} onClick={(e) => { e.stopPropagation(); onSelectComponent?.('gasifier'); }}>
-      {/* Selection highlight ring */}
-      {selected && (
-        <mesh position={[0, -0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.7, 1.9, 36]} />
-          <meshBasicMaterial color="#38bdf8" side={THREE.DoubleSide} />
-        </mesh>
-      )}
+      {/* Selection highlight outline */}
+      {selected && <SelectionOutlineRing radius={1.9} color="#38bdf8" />}
 
       {/* ── 1. Structural Support Legs & Anchor Plates ────────── */}
       {[
@@ -195,17 +194,14 @@ export function GasifierUnit({
         [0.95, 0.95],
       ].map(([lx, lz], i) => (
         <group key={`leg-${i}`} position={[lx, 0.75, lz]}>
-          {/* Vertical tubular column leg */}
           <mesh>
             <cylinderGeometry args={[0.07, 0.08, 1.5, 12]} />
-            <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
+            <meshStandardMaterial color={p.equipment.gasifierLegs} metalness={0.7} roughness={0.3} />
           </mesh>
-          {/* Diagonal gusset bracket to vessel wall */}
           <mesh position={[-lx * 0.15, 0.6, -lz * 0.15]} rotation={[0, 0, Math.PI / 6]}>
             <boxGeometry args={[0.04, 0.35, 0.08]} />
-            <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.3} />
+            <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.7} roughness={0.3} />
           </mesh>
-          {/* Sole plate at ground */}
           <mesh position={[0, -0.73, 0]}>
             <boxGeometry args={[0.26, 0.04, 0.26]} />
             <meshStandardMaterial color="#0f172a" metalness={0.8} roughness={0.2} />
@@ -215,22 +211,18 @@ export function GasifierUnit({
 
       {/* ── 2. Ash Discharge Cone & Motorized Airlock Valve ────── */}
       <group position={[0, 0.2, 0]}>
-        {/* Bottom conical ash hopper */}
         <mesh position={[0, -0.22, 0]}>
           <cylinderGeometry args={[1.15, 0.25, 0.45, 24]} />
-          <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.25} />
+          <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.8} roughness={0.25} />
         </mesh>
-        {/* Rotary airlock valve housing */}
         <mesh position={[0, -0.52, 0]}>
           <boxGeometry args={[0.32, 0.18, 0.32]} />
-          <meshStandardMaterial color="#0284c7" metalness={0.7} roughness={0.3} />
+          <meshStandardMaterial color={p.equipment.pumpCasing} metalness={0.7} roughness={0.3} />
         </mesh>
-        {/* Valve electric motor */}
         <mesh position={[0.24, -0.52, 0]} rotation={[0, 0, Math.PI / 2]}>
           <cylinderGeometry args={[0.08, 0.08, 0.18, 12]} />
-          <meshStandardMaterial color="#1e40af" metalness={0.7} roughness={0.3} />
+          <meshStandardMaterial color={p.equipment.pumpMotor} metalness={0.7} roughness={0.3} />
         </mesh>
-        {/* Ash discharge collection drum */}
         <mesh position={[0, -0.72, 0]}>
           <cylinderGeometry args={[0.28, 0.28, 0.24, 16]} />
           <meshStandardMaterial color="#475569" metalness={0.75} roughness={0.25} />
@@ -240,12 +232,12 @@ export function GasifierUnit({
       {/* ── 3. Air Plenum Chamber (Windbox Below Distributor) ──── */}
       <mesh position={[0, 0.48, 0]}>
         <cylinderGeometry args={[1.18, 1.15, 0.52, 28]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.25} />
+        <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.8} roughness={0.25} />
       </mesh>
-      {/* Primary Air Intake Nozzle / Flange */}
+      {/* Primary Air Intake Nozzle */}
       <mesh position={[-1.25, 0.48, 0]} rotation={[0, 0, Math.PI / 2]}>
         <cylinderGeometry args={[0.16, 0.16, 0.35, 16]} />
-        <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
+        <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.8} roughness={0.2} />
       </mesh>
 
       {/* ── 4. Air Distributor Plate (Tuyere Deck) ─────────────── */}
@@ -254,7 +246,6 @@ export function GasifierUnit({
           <cylinderGeometry args={[1.18, 1.18, 0.08, 28]} />
           <meshStandardMaterial color="#94a3b8" metalness={0.85} roughness={0.2} />
         </mesh>
-        {/* Tuyere bubble nozzles grid */}
         {[-0.6, -0.2, 0.2, 0.6].map((x, i) =>
           [-0.6, -0.2, 0.2, 0.6].map((z, j) => (
             <mesh key={`tuyere-${i}-${j}`} position={[x * 0.82, 0.06, z * 0.82]}>
@@ -265,21 +256,21 @@ export function GasifierUnit({
         )}
       </group>
 
-      {/* ── 5. Main Vessel Shell & Multi-Layer Refractory Cutaway ── */}
-      {/* Outer Carbon Steel Shell (with front cutaway sector) */}
+      {/* ── 5. Main Vessel Shell & Warm Terracotta Refractory ──── */}
+      {/* Outer Shell in High-Contrast Warm Terracotta Refractory with Cutaway */}
       <mesh position={[0, 2.25, 0]}>
         <cylinderGeometry
           args={[1.18, 1.18, 2.9, 32, 1, false, Math.PI * 0.25, Math.PI * 1.55]}
         />
         <meshStandardMaterial
-          color="#1e293b"
-          metalness={0.75}
-          roughness={0.25}
+          color={p.equipment.gasifierShell}
+          metalness={0.4}
+          roughness={0.5}
           side={THREE.DoubleSide}
         />
       </mesh>
 
-      {/* Intermediate Insulating Fiber Blanket Layer (visible in cutaway) */}
+      {/* Intermediate Insulating Blanket (visible in cutaway) */}
       <mesh position={[0, 2.25, 0]}>
         <cylinderGeometry
           args={[1.12, 1.12, 2.88, 32, 1, false, Math.PI * 0.25, Math.PI * 1.55]}
@@ -292,13 +283,13 @@ export function GasifierUnit({
         />
       </mesh>
 
-      {/* Inner Alumina Refractory Brick Liner (visible in cutaway) */}
+      {/* Inner Alumina Refractory Brick Liner */}
       <mesh position={[0, 2.25, 0]}>
         <cylinderGeometry
           args={[1.04, 1.04, 2.86, 32, 1, false, Math.PI * 0.25, Math.PI * 1.55]}
         />
         <meshStandardMaterial
-          color="#b45309"
+          color={p.equipment.gasifierLiner}
           roughness={0.9}
           metalness={0.05}
           side={THREE.DoubleSide}
@@ -311,7 +302,7 @@ export function GasifierUnit({
           args={[1.19, 1.19, 2.88, 24, 1, false, -Math.PI * 0.25, Math.PI * 0.5]}
         />
         <meshStandardMaterial
-          color="#38bdf8"
+          color={p.equipment.gasifierObservationGlass}
           metalness={0.1}
           roughness={0.1}
           transparent
@@ -320,14 +311,13 @@ export function GasifierUnit({
         />
       </mesh>
 
-      {/* ── 6. Flanged Joints & Bolt Studs ─────────────────────── */}
+      {/* ── 6. Structural Steel Bands & Flanges (High Contrast) ─ */}
       {[0.78, 2.2, 3.65].map((fy, idx) => (
         <group key={`flange-${idx}`} position={[0, fy, 0]}>
           <mesh>
             <cylinderGeometry args={[1.26, 1.26, 0.08, 32]} />
-            <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
+            <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.85} roughness={0.2} />
           </mesh>
-          {/* Bolt heads around flange perimeter */}
           {Array.from({ length: 12 }).map((_, bIdx) => (
             <mesh
               key={`bolt-${bIdx}`}
@@ -338,7 +328,7 @@ export function GasifierUnit({
               ]}
             >
               <boxGeometry args={[0.03, 0.1, 0.03]} />
-              <meshStandardMaterial color="#94a3b8" metalness={0.9} roughness={0.1} />
+              <meshStandardMaterial color="#cbd5e1" metalness={0.9} roughness={0.1} />
             </mesh>
           ))}
         </group>
@@ -347,37 +337,15 @@ export function GasifierUnit({
       {/* ── 7. Top Dome (Disengagement Head) & Exit Nozzle ──────── */}
       <mesh position={[0, 3.75, 0]}>
         <sphereGeometry args={[1.18, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
-        <meshStandardMaterial color="#334155" metalness={0.8} roughness={0.25} />
+        <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.8} roughness={0.25} />
       </mesh>
-      {/* Top Syngas Discharge Nozzle */}
       <mesh position={[0, 4.4, 0]}>
         <cylinderGeometry args={[0.2, 0.2, 0.55, 18]} />
-        <meshStandardMaterial color="#64748b" metalness={0.8} roughness={0.2} />
+        <meshStandardMaterial color={p.equipment.gasifierBands} metalness={0.8} roughness={0.2} />
       </mesh>
 
-      {/* ── 8. Thermocouple Instrument Stubs ─────────────────────── */}
-      {[
-        { y: 0.48, label: 'TC1: Plenum Inflow' },
-        { y: 1.05, label: 'TC2: Lower Bed Zone' },
-        { y: 1.65, label: 'TC3: Active Bubbling Zone' },
-        { y: 2.85, label: 'TC4: Freeboard Gas' },
-      ].map((tc, idx) => (
-        <group key={`tc-${idx}`} position={[0.95, tc.y, 0.72]}>
-          {/* Radial thermowell boss */}
-          <mesh rotation={[0, 0, Math.PI / 2]}>
-            <cylinderGeometry args={[0.035, 0.035, 0.32, 10]} />
-            <meshStandardMaterial color="#94a3b8" metalness={0.9} roughness={0.1} />
-          </mesh>
-          {/* Blue explosion-proof transmitter head */}
-          <mesh position={[0.2, 0, 0]}>
-            <cylinderGeometry args={[0.065, 0.065, 0.12, 12]} />
-            <meshStandardMaterial color="#0284c7" metalness={0.7} roughness={0.3} />
-          </mesh>
-        </group>
-      ))}
-
-      {/* ── 9. Fluidized Bed Core Glow & Dynamic Level Ring ──────── */}
-      {/* Dynamic Temperature Margin Glow Cylinder */}
+      {/* ── 8. Fluidized Bed Core Glow & Dynamic Level Ring ──────── */}
+      {/* Emissive glow ONLY on hot internal bed core inside cutaway */}
       <mesh ref={glowRef} position={[0, 1.45, 0]}>
         <cylinderGeometry args={[0.9, 0.98, 1.4, 20]} />
         <meshStandardMaterial
@@ -385,14 +353,14 @@ export function GasifierUnit({
           emissive={glowInfo.color}
           emissiveIntensity={glowInfo.intensity}
           transparent
-          opacity={0.24}
+          opacity={0.25}
         />
       </mesh>
 
       {/* Dynamic Bed Surface Level Ring */}
       <mesh position={[0, bedHeightDisplay, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.82, 0.88, 32]} />
-        <meshBasicMaterial color="#38bdf8" transparent opacity={0.8} side={THREE.DoubleSide} />
+        <meshBasicMaterial color="#38bdf8" transparent opacity={0.85} side={THREE.DoubleSide} />
       </mesh>
 
       {/* Active Physics Instanced Particles */}
@@ -410,48 +378,16 @@ export function GasifierUnit({
         />
       </instancedMesh>
 
-      {/* ── 10. Labels with Thin Leader Lines (Staggered Heights) ── */}
-      {/* Main Gasifier Label above vessel top */}
-      <UnitLabel
-        position={[0, 5.6, 0]}
+      {/* ── 9. Decluttered Unit Tag (Clean Scene, Details on Click) ── */}
+      <UnitTag
+        position={[0, 5.2, 0]}
         targetPosition={[0, 4.4, 0]}
-        title="FLUIDIZED BED GASIFIER"
-        subtitle={`${temperature.toFixed(0)} °C · Autothermal Bubbling Bed`}
-        tag="REACTOR TWIN"
-        tagColor="#f59e0b"
+        unitNumber={2}
+        name="Bed Gasifier"
+        headline={`${temperature.toFixed(0)} °C`}
         accentColor="#f59e0b"
+        selected={selected}
         onClick={() => onSelectComponent?.('gasifier')}
-      />
-
-      {/* Sub-labels on front side facing camera with dedicated leader lines */}
-      <SubLabel
-        position={[3.3, 3.5, 1.8]}
-        targetPosition={[0.8, 3.2, 0.7]}
-        text="FREEBOARD (DISENGAGEMENT)"
-        color="#94a3b8"
-      />
-
-      <SubLabel
-        position={[3.3, bedHeightDisplay, 1.8]}
-        targetPosition={[0.7, bedHeightDisplay, 0.7]}
-        text="BED SURFACE LEVEL"
-        value={`H = ${(bedHeightDisplay - DISTRIBUTOR_Y).toFixed(2)}m`}
-        color="#38bdf8"
-      />
-
-      <SubLabel
-        position={[3.3, 1.1, 1.8]}
-        targetPosition={[0.8, DISTRIBUTOR_Y, 0.7]}
-        text="AIR DISTRIBUTOR PLATE"
-        value="Tuyere Deck"
-        color="#e2e8f0"
-      />
-
-      <SubLabel
-        position={[3.3, 0.45, 1.8]}
-        targetPosition={[0.8, 0.45, 0.7]}
-        text="AIR PLENUM WINDBOX"
-        color="#64748b"
       />
     </group>
   )
