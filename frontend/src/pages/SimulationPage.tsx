@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo, Suspense } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { OrbitControls, Text, PerspectiveCamera } from '@react-three/drei'
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
+import { Canvas } from '@react-three/fiber'
 import { api, createSimulationSocket } from '../services/api'
 import type { SimulationResult, Scenario } from '../types'
 import {
@@ -12,1033 +11,13 @@ import {
   CheckCircle2,
   Sliders,
   Eye,
-  Info,
   X,
-  Layers,
-  Activity,
-  Zap,
   Flame,
-  Gauge
+  Camera,
 } from 'lucide-react'
 import { LineChart, Line as RLine, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import * as THREE from 'three'
-
-// ── Temperature Margin Glow Evaluator ─────────────────────────
-function getTemperatureColorAndIntensity(tempC: number): {
-  color: string
-  intensity: number
-  label: string
-} {
-  // Margin relative to optimal autothermal bubbling setpoint [800 °C - 900 °C]
-  if (tempC < 650) {
-    return { color: '#64748b', intensity: 0.25, label: 'Cold Bed / Extinction Risk' }
-  } else if (tempC < 750) {
-    return { color: '#d97706', intensity: 0.45, label: 'Cold Bed Margin (<750 °C)' }
-  } else if (tempC <= 900) {
-    // Optimal operating zone (800 - 900 °C)
-    const normalized = Math.min(1.0, Math.max(0.0, (tempC - 750) / 150))
-    const intensity = 0.7 + normalized * 0.35
-    return { color: '#f59e0b', intensity, label: 'Optimal Autothermal Regime' }
-  } else if (tempC <= 1000) {
-    // Thermal warning zone (900 - 1000 °C): polymer softening & accelerated sintering
-    return { color: '#ea580c', intensity: 1.2, label: 'Elevated Thermal Margin (>900 °C)' }
-  } else {
-    // Thermal runaway (>1000 °C): severe mineral clinkering
-    return { color: '#ef4444', intensity: 1.6, label: 'Sintering Runaway (>1000 °C)' }
-  }
-}
-
-// ── 3D Components ─────────────────────────────────────────────
-
-// 1. Conveyor (Schematic waste feed)
-function Conveyor({ running, paused }: { running: boolean; paused: boolean }) {
-  const beltRef = useRef<THREE.Mesh>(null)
-  useFrame((_, delta) => {
-    if (running && !paused && beltRef.current) {
-      const mat = beltRef.current.material as THREE.MeshStandardMaterial
-      if (mat.map) mat.map.offset.x += delta * 0.3
-    }
-  })
-
-  return (
-    <group position={[-8, 0.3, 0]}>
-      {/* Belt structure */}
-      <mesh ref={beltRef} position={[0, 0, 0]}>
-        <boxGeometry args={[6, 0.15, 1.2]} />
-        <meshStandardMaterial color="#334155" metalness={0.6} roughness={0.3} />
-      </mesh>
-      {/* Supports */}
-      {[-2.5, 0, 2.5].map((x, i) => (
-        <mesh key={i} position={[x, -0.4, 0]}>
-          <boxGeometry args={[0.12, 0.7, 1.3]} />
-          <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
-        </mesh>
-      ))}
-      {/* Side rails */}
-      <mesh position={[0, 0.15, 0.65]}>
-        <boxGeometry args={[6, 0.2, 0.06]} />
-        <meshStandardMaterial color="#475569" metalness={0.5} roughness={0.4} />
-      </mesh>
-      <mesh position={[0, 0.15, -0.65]}>
-        <boxGeometry args={[6, 0.2, 0.06]} />
-        <meshStandardMaterial color="#475569" metalness={0.5} roughness={0.4} />
-      </mesh>
-      {/* Rollers */}
-      {[-2.8, -1.4, 0, 1.4, 2.8].map((x, i) => (
-        <mesh key={`r${i}`} position={[x, -0.08, 0]} rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.08, 0.08, 1.2, 12]} />
-          <meshStandardMaterial color="#94a3b8" metalness={0.8} roughness={0.2} />
-        </mesh>
-      ))}
-      <Text position={[0, 1.4, 0]} fontSize={0.2} color="#94a3b8" anchorX="center" fontWeight="bold">
-        SORTING CONVEYOR [SCHEMATIC]
-      </Text>
-    </group>
-  )
-}
-
-// 2. Waste Objects (Schematic visual)
-function WasteObjects({ running, paused }: { running: boolean; paused: boolean }) {
-  const ref = useRef<THREE.Group>(null)
-  const timeRef = useRef(0)
-
-  useFrame((_, delta) => {
-    if (running && !paused) {
-      timeRef.current += delta
-      if (ref.current) {
-        ref.current.children.forEach((child, i) => {
-          const speed = 0.8
-          const offset = i * 1.5
-          const x = ((timeRef.current * speed + offset) % 8) - 7
-          child.position.x = x
-          child.rotation.y += delta * 0.3
-          child.visible = x < 5 && x > -11
-        })
-      }
-    }
-  })
-
-  const colors = ['#ef4444', '#3b82f6', '#22c55e', '#8b5cf6', '#f59e0b']
-  return (
-    <group ref={ref} position={[-4, 0.6, 0]}>
-      {Array.from({ length: 6 }).map((_, i) => (
-        <group key={i} position={[i * -1.5, 0, (Math.random() - 0.5) * 0.6]}>
-          {i % 3 === 0 ? (
-            <mesh>
-              <boxGeometry args={[0.35, 0.25, 0.3]} />
-              <meshStandardMaterial color={colors[i % 5]} roughness={0.3} metalness={0.4} />
-            </mesh>
-          ) : i % 3 === 1 ? (
-            <mesh>
-              <cylinderGeometry args={[0.15, 0.15, 0.3, 8]} />
-              <meshStandardMaterial color={colors[i % 5]} roughness={0.3} metalness={0.4} />
-            </mesh>
-          ) : (
-            <mesh>
-              <sphereGeometry args={[0.18, 8, 8]} />
-              <meshStandardMaterial color={colors[i % 5]} roughness={0.3} metalness={0.4} />
-            </mesh>
-          )}
-        </group>
-      ))}
-    </group>
-  )
-}
-
-// 3. AI Camera Scanner (Schematic visual)
-function AICamera() {
-  return (
-    <group position={[-5, 2.2, 0]}>
-      {/* Camera body */}
-      <mesh>
-        <boxGeometry args={[0.5, 0.35, 0.3]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.2} />
-      </mesh>
-      {/* Lens */}
-      <mesh position={[0, -0.1, 0.18]}>
-        <cylinderGeometry args={[0.1, 0.12, 0.1, 14]} />
-        <meshStandardMaterial color="#0284c7" metalness={0.9} roughness={0.1} />
-      </mesh>
-      {/* Scan beam */}
-      <mesh position={[0, -0.9, 0]}>
-        <coneGeometry args={[0.8, 1.5, 6]} />
-        <meshStandardMaterial color="#06b6d4" transparent opacity={0.15} wireframe />
-      </mesh>
-      {/* Mount */}
-      <mesh position={[0, 0.3, 0]}>
-        <cylinderGeometry args={[0.04, 0.04, 0.4, 8]} />
-        <meshStandardMaterial color="#475569" metalness={0.7} roughness={0.3} />
-      </mesh>
-      <Text position={[0, 0.8, 0]} fontSize={0.18} color="#38bdf8" anchorX="center" fontWeight="bold">
-        AI OPTICAL SCANNER [SCHEMATIC]
-      </Text>
-    </group>
-  )
-}
-
-// 4. Fluidized Bed Particles (InstancedMesh driven by U0/Umf_eff, U0/Ut, d_p_eff)
-interface BedParticlesProps {
-  u0_over_umf_eff: number
-  u0_over_ut: number
-  d_eff_m: number
-  u0_m_s: number
-  umf_eff_m_s: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  tempC: number
-}
-
-const PARTICLE_COUNT = 1800
-const BED_RADIUS = 0.85
-const DISTRIBUTOR_Y = 0.45
-const STATIC_BED_H = 0.75
-
-function FluidizedBedParticles({
-  u0_over_umf_eff,
-  u0_over_ut,
-  d_eff_m,
-  u0_m_s,
-  umf_eff_m_s,
-  running,
-  paused,
-  reducedMotion,
-  tempC,
-}: BedParticlesProps) {
-  const meshRef = useRef<THREE.InstancedMesh>(null)
-
-  // Particle state data: [x, y, z, vx, vy, vz, phase, baseRadius]
-  const particles = useMemo(() => {
-    const data = []
-    const rnd = new THREE.Vector3()
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // Cylinder distribution inside the bed
-      const theta = Math.random() * Math.PI * 2
-      const r = Math.sqrt(Math.random()) * BED_RADIUS
-      const x = r * Math.cos(theta)
-      const z = r * Math.sin(theta)
-      const y = DISTRIBUTOR_Y + Math.random() * STATIC_BED_H
-      const phase = Math.random() * Math.PI * 2
-      const speed = 0.6 + Math.random() * 0.8
-      data.push({ x, y, z, vx: 0, vy: speed, vz: 0, phase, r })
-    }
-    return data
-  }, [])
-
-  // Particle size scaling factor based on d_eff (base 400 µm)
-  const particleScale = useMemo(() => {
-    const ratio = Math.max(0.6, Math.min(3.5, d_eff_m / 400e-6))
-    return 0.024 * ratio
-  }, [d_eff_m])
-
-  // Color selection based on temperature and agglomeration
-  const particleColor = useMemo(() => {
-    const col = new THREE.Color()
-    if (u0_over_umf_eff < 1.0) {
-      // Slumped / defluidized: darker sintered tone
-      col.set('#b45309')
-    } else if (tempC > 930) {
-      col.set('#f97316')
-    } else {
-      col.set('#fbbf24')
-    }
-    return col
-  }, [u0_over_umf_eff, tempC])
-
-  const dummy = useMemo(() => new THREE.Object3D(), [])
-
-  useFrame((_, delta) => {
-    if (!meshRef.current) return
-    const activeDelta = running && !paused && !reducedMotion ? delta : 0
-
-    const u_excess = Math.max(0, u0_m_s - umf_eff_m_s)
-    const bedExpansion = Math.min(0.7, Math.max(0, (u0_over_umf_eff - 1.0) * 0.08))
-    const currentBedTop = DISTRIBUTOR_Y + STATIC_BED_H + bedExpansion
-
-    particles.forEach((p, i) => {
-      if (activeDelta > 0) {
-        if (u0_over_umf_eff < 1.0) {
-          // REGIME 1: Static Packed Bed (U0 < Umf_eff)
-          // Slumped to bottom, minimal Brownian jitter only
-          p.y = Math.max(DISTRIBUTOR_Y + 0.02, Math.min(DISTRIBUTOR_Y + STATIC_BED_H * 0.8, p.y))
-          p.x += Math.sin(p.phase + Date.now() * 0.001) * 0.0004
-          p.z += Math.cos(p.phase + Date.now() * 0.001) * 0.0004
-        } else if (u0_over_umf_eff < 2.0) {
-          // REGIME 2: Incipient Fluidization (1.0 <= U0/Umf_eff < 2.0)
-          // Minimal local motion, gentle oscillation
-          p.y += Math.sin(Date.now() * 0.004 + p.phase) * activeDelta * 0.08
-          p.y = Math.max(DISTRIBUTOR_Y + 0.03, Math.min(currentBedTop, p.y))
-        } else {
-          // REGIME 3: Bubbling Fluidization (U0/Umf_eff >= 2.0)
-          // Bubbling scaled by (U0 - Umf_eff): upward wake in core, downflow at walls
-          const isCore = p.r < BED_RADIUS * 0.65
-          const wakeSpeed = (0.4 + u_excess * 0.8) * p.vy
-
-          if (isCore) {
-            // Core rise
-            p.y += activeDelta * wakeSpeed
-            if (p.y > currentBedTop) {
-              // Surface eruption: particles burst and migrate outward to wall
-              p.y = currentBedTop
-              p.r = Math.min(BED_RADIUS * 0.95, p.r + 0.15)
-              const theta = Math.atan2(p.z, p.x)
-              p.x = p.r * Math.cos(theta)
-              p.z = p.r * Math.sin(theta)
-            }
-          } else {
-            // Wall descent
-            p.y -= activeDelta * wakeSpeed * 0.7
-            if (p.y < DISTRIBUTOR_Y + 0.05) {
-              // Bottom recycle toward core
-              p.y = DISTRIBUTOR_Y + 0.05
-              p.r = Math.max(0.05, p.r - 0.2)
-              const theta = Math.atan2(p.z, p.x)
-              p.x = p.r * Math.cos(theta)
-              p.z = p.r * Math.sin(theta)
-            }
-          }
-
-          // REGIME 4: Entrainment / Elutriation as U0/Ut approaches 1.0 (or > 0.45)
-          if (u0_over_ut > 0.45 && i % 8 === 0) {
-            // Fines loft into freeboard
-            p.y += activeDelta * (u0_over_ut * 1.5)
-            if (p.y > 3.2) p.y = DISTRIBUTOR_Y + 0.1
-          }
-        }
-      }
-
-      dummy.position.set(p.x, p.y, p.z)
-      dummy.scale.set(particleScale, particleScale, particleScale)
-      dummy.updateMatrix()
-      meshRef.current!.setMatrixAt(i, dummy.matrix)
-      meshRef.current!.setColorAt(i, particleColor)
-    })
-
-    meshRef.current.instanceMatrix.needsUpdate = true
-    if (meshRef.current.instanceColor) meshRef.current.instanceColor.needsUpdate = true
-  })
-
-  return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined, undefined, PARTICLE_COUNT]}
-      position={[0, 0, 0]}
-    >
-      <sphereGeometry args={[1, 6, 6]} />
-      <meshStandardMaterial
-        color="#fbbf24"
-        emissive={tempC > 800 ? '#ea580c' : '#78350f'}
-        emissiveIntensity={0.3}
-        roughness={0.4}
-      />
-    </instancedMesh>
-  )
-}
-
-// 5. Gasifier Cutaway Component
-interface GasifierProps {
-  temperature: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  u0_over_umf_eff: number
-  u0_over_ut: number
-  d_eff_m: number
-  u0_m_s: number
-  umf_eff_m_s: number
-  onSelect: () => void
-  selected: boolean
-}
-
-function Gasifier({
-  temperature,
-  running,
-  paused,
-  reducedMotion,
-  u0_over_umf_eff,
-  u0_over_ut,
-  d_eff_m,
-  u0_m_s,
-  umf_eff_m_s,
-  onSelect,
-  selected,
-}: GasifierProps) {
-  const glowRef = useRef<THREE.Mesh>(null)
-  const glowInfo = getTemperatureColorAndIntensity(temperature)
-
-  useFrame(() => {
-    if (glowRef.current) {
-      const mat = glowRef.current.material as THREE.MeshStandardMaterial
-      const pulse = running && !paused && !reducedMotion ? Math.sin(Date.now() * 0.004) * 0.15 : 0
-      mat.emissiveIntensity = Math.max(0.1, glowInfo.intensity + pulse)
-    }
-  })
-
-  const bedHeightDisplay = DISTRIBUTOR_Y + STATIC_BED_H + Math.min(0.6, Math.max(0, (u0_over_umf_eff - 1.0) * 0.08))
-
-  return (
-    <group position={[-1, 0, 0]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
-      {/* Selection highlight ring */}
-      {selected && (
-        <mesh position={[0, -0.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.5, 1.7, 32]} />
-          <meshBasicMaterial color="#38bdf8" side={THREE.DoubleSide} />
-        </mesh>
-      )}
-
-      {/* Main Reactor Vessel Cutaway (Transparent Outer Shell) */}
-      <mesh position={[0, 1.8, 0]}>
-        <cylinderGeometry args={[1.15, 1.25, 3.2, 28, 1, false, 0, Math.PI * 1.85]} />
-        <meshStandardMaterial
-          color="#1e293b"
-          metalness={0.7}
-          roughness={0.2}
-          transparent
-          opacity={0.32}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-
-      {/* Top Dome (Disengagement Head) */}
-      <mesh position={[0, 3.4, 0]}>
-        <sphereGeometry args={[1.15, 24, 12, 0, Math.PI * 1.85, 0, Math.PI / 2]} />
-        <meshStandardMaterial
-          color="#334155"
-          metalness={0.8}
-          roughness={0.25}
-          transparent
-          opacity={0.38}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-
-      {/* Syngas Exit Nozzle */}
-      <mesh position={[0, 3.9, 0]}>
-        <cylinderGeometry args={[0.2, 0.2, 0.6, 16]} />
-        <meshStandardMaterial color="#64748b" metalness={0.7} roughness={0.3} />
-      </mesh>
-
-      {/* Air Distributor Plate (Tuyere Perforated Deck) */}
-      <group position={[0, DISTRIBUTOR_Y, 0]}>
-        <mesh>
-          <cylinderGeometry args={[1.18, 1.18, 0.08, 24]} />
-          <meshStandardMaterial color="#94a3b8" metalness={0.8} roughness={0.2} />
-        </mesh>
-        {/* Tuyere bubble nozzles */}
-        {[-0.6, -0.2, 0.2, 0.6].map((x, i) =>
-          [-0.6, -0.2, 0.2, 0.6].map((z, j) => (
-            <mesh key={`${i}-${j}`} position={[x * 0.8, 0.06, z * 0.8]}>
-              <cylinderGeometry args={[0.025, 0.03, 0.06, 8]} />
-              <meshStandardMaterial color="#cbd5e1" metalness={0.9} roughness={0.1} />
-            </mesh>
-          ))
-        )}
-      </group>
-
-      {/* Air Plenum Windbox Chamber (Below Distributor) */}
-      <mesh position={[0, 0.2, 0]}>
-        <cylinderGeometry args={[1.2, 1.22, 0.4, 24]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.3} />
-      </mesh>
-      {/* Primary Air Intake Flange */}
-      <mesh position={[-1.3, 0.2, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.15, 0.15, 0.6, 12]} />
-        <meshStandardMaterial color="#475569" metalness={0.7} roughness={0.3} />
-      </mesh>
-
-      {/* Fluidized Bed Internal Glow Core (Keyed to temperature margin) */}
-      <mesh ref={glowRef} position={[0, 1.1, 0]}>
-        <cylinderGeometry args={[0.9, 1.0, 1.3, 18]} />
-        <meshStandardMaterial
-          color={glowInfo.color}
-          emissive={glowInfo.color}
-          emissiveIntensity={glowInfo.intensity}
-          transparent
-          opacity={0.25}
-        />
-      </mesh>
-
-      {/* Dynamic Bed Surface Level Indicator Ring */}
-      <mesh position={[0, bedHeightDisplay, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.82, 0.86, 28]} />
-        <meshBasicMaterial color="#38bdf8" transparent opacity={0.65} side={THREE.DoubleSide} />
-      </mesh>
-
-      {/* Active Physics Bed Particles */}
-      <FluidizedBedParticles
-        u0_over_umf_eff={u0_over_umf_eff}
-        u0_over_ut={u0_over_ut}
-        d_eff_m={d_eff_m}
-        u0_m_s={u0_m_s}
-        umf_eff_m_s={umf_eff_m_s}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-        tempC={temperature}
-      />
-
-      {/* Base Structural Ring */}
-      <mesh position={[0, -0.05, 0]}>
-        <cylinderGeometry args={[1.4, 1.4, 0.15, 24]} />
-        <meshStandardMaterial color="#0f172a" metalness={0.8} roughness={0.3} />
-      </mesh>
-
-      {/* High-Contrast 3D Annotation Labels */}
-      <Text position={[0, 4.4, 0]} fontSize={0.25} color="#38bdf8" anchorX="center" fontWeight="bold">
-        FLUIDIZED BED GASIFIER
-      </Text>
-      <Text position={[1.35, 2.7, 0]} fontSize={0.16} color="#94a3b8" anchorX="left">
-        FREEBOARD (DISENGAGEMENT)
-      </Text>
-      <Text position={[1.35, bedHeightDisplay, 0]} fontSize={0.16} color="#38bdf8" anchorX="left">
-        BED SURFACE LEVEL
-      </Text>
-      <Text position={[1.35, DISTRIBUTOR_Y, 0]} fontSize={0.15} color="#e2e8f0" anchorX="left">
-        AIR DISTRIBUTOR PLATE
-      </Text>
-    </group>
-  )
-}
-
-// 6. HRSG Steam Boiler Component
-interface BoilerProps {
-  steamFlow: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  onSelect: () => void
-  selected: boolean
-}
-
-function Boiler({
-  steamFlow,
-  running,
-  paused,
-  reducedMotion,
-  onSelect,
-  selected,
-}: BoilerProps) {
-  const steamRef = useRef<THREE.Group>(null)
-
-  useFrame((_, delta) => {
-    if (steamRef.current && running && !paused && !reducedMotion) {
-      const speed = Math.min(2.5, Math.max(0.3, (steamFlow / 1500) * 0.8))
-      steamRef.current.children.forEach((p) => {
-        p.position.y += delta * speed
-        if (p.position.y > 1.6) p.position.y = 0
-        const mat = (p as any).material as THREE.MeshStandardMaterial
-        mat.opacity = Math.max(0, 0.45 - p.position.y * 0.28)
-      })
-    }
-  })
-
-  return (
-    <group position={[3.5, 0, 0]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
-      {/* Selection Ring */}
-      {selected && (
-        <mesh position={[0, -0.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.5, 1.7, 32]} />
-          <meshBasicMaterial color="#f59e0b" side={THREE.DoubleSide} />
-        </mesh>
-      )}
-
-      {/* Boiler Horizontal Vessel Shell */}
-      <mesh position={[0, 1.8, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.9, 0.9, 2.6, 24]} />
-        <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.25} />
-      </mesh>
-      {/* End caps */}
-      <mesh position={[-1.3, 1.8, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <sphereGeometry args={[0.9, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]} />
-        <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.25} />
-      </mesh>
-      <mesh position={[1.3, 1.8, 0]} rotation={[0, 0, -Math.PI / 2]}>
-        <sphereGeometry args={[0.9, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]} />
-        <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.25} />
-      </mesh>
-      {/* Upper Steam Drum */}
-      <mesh position={[0, 2.85, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.35, 0.35, 1.8, 16]} />
-        <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
-      </mesh>
-      {/* Downcomer & Riser Tubes */}
-      {[-0.6, 0, 0.6].map((x, i) => (
-        <mesh key={i} position={[x, 2.35, 0]}>
-          <cylinderGeometry args={[0.06, 0.06, 1.0, 10]} />
-          <meshStandardMaterial color="#64748b" metalness={0.8} roughness={0.2} />
-        </mesh>
-      ))}
-
-      {/* Steam Vent Particles */}
-      <group ref={steamRef} position={[0, 3.2, 0]}>
-        {Array.from({ length: 12 }).map((_, i) => (
-          <mesh key={i} position={[(Math.random() - 0.5) * 0.4, Math.random() * 1.5, (Math.random() - 0.5) * 0.4]}>
-            <sphereGeometry args={[0.06, 6, 6]} />
-            <meshStandardMaterial color="#f8fafc" transparent opacity={0.35} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* Supports */}
-      <mesh position={[-0.7, 0.5, 0]}>
-        <boxGeometry args={[0.18, 1, 0.2]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
-      </mesh>
-      <mesh position={[0.7, 0.5, 0]}>
-        <boxGeometry args={[0.18, 1, 0.2]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
-      </mesh>
-
-      <Text position={[0, 4.0, 0]} fontSize={0.25} color="#f59e0b" anchorX="center" fontWeight="bold">
-        HRSG STEAM BOILER
-      </Text>
-      <Text position={[0, 3.65, 0]} fontSize={0.16} color="#cbd5e1" anchorX="center">
-        10 bar · 350 °C Superheated
-      </Text>
-    </group>
-  )
-}
-
-// 7. Proper Multi-Stage Steam Turbine & Generator Model
-interface TurbineProps {
-  powerKw: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  onSelect: () => void
-  selected: boolean
-}
-
-function Turbine({
-  powerKw,
-  running,
-  paused,
-  reducedMotion,
-  onSelect,
-  selected,
-}: TurbineProps) {
-  const rotorRef = useRef<THREE.Group>(null)
-
-  useFrame((_, delta) => {
-    if (rotorRef.current && running && !paused && !reducedMotion) {
-      // RPM speed scaled by electrical power kW
-      const spinSpeed = Math.min(25, Math.max(0.5, powerKw * 0.05))
-      rotorRef.current.rotation.x += delta * spinSpeed
-    }
-  })
-
-  return (
-    <group position={[7.2, 0, 0]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
-      {/* Selection Ring */}
-      {selected && (
-        <mesh position={[0, -0.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.5, 1.7, 32]} />
-          <meshBasicMaterial color="#60a5fa" side={THREE.DoubleSide} />
-        </mesh>
-      )}
-
-      {/* Multi-Stage Turbine Expander Casing (Tapered Axial Profile) */}
-      <mesh position={[-0.5, 1.4, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.55, 0.85, 1.8, 24]} />
-        <meshStandardMaterial color="#1e40af" metalness={0.7} roughness={0.25} />
-      </mesh>
-
-      {/* Rotating Internal Multi-Stage Rotor Assembly */}
-      <group ref={rotorRef} position={[-0.5, 1.4, 0]}>
-        {/* Central Rotor Shaft */}
-        <mesh rotation={[0, 0, Math.PI / 2]}>
-          <cylinderGeometry args={[0.08, 0.08, 2.2, 16]} />
-          <meshStandardMaterial color="#cbd5e1" metalness={0.9} roughness={0.1} />
-        </mesh>
-        {/* 4 Multi-Stage Blade Disks (HP -> IP -> LP) */}
-        {[-0.6, -0.2, 0.2, 0.6].map((x, idx) => {
-          const diskRadius = 0.35 + idx * 0.12
-          return (
-            <group key={idx} position={[x, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-              <mesh>
-                <cylinderGeometry args={[diskRadius, diskRadius, 0.04, 18]} />
-                <meshStandardMaterial color="#e2e8f0" metalness={0.85} roughness={0.15} />
-              </mesh>
-              {/* Radial Blade Tips */}
-              {Array.from({ length: 8 }).map((_, bIdx) => (
-                <mesh
-                  key={bIdx}
-                  position={[
-                    Math.cos((bIdx * Math.PI) / 4) * (diskRadius + 0.04),
-                    0,
-                    Math.sin((bIdx * Math.PI) / 4) * (diskRadius + 0.04),
-                  ]}
-                  rotation={[0, (bIdx * Math.PI) / 4, 0]}
-                >
-                  <boxGeometry args={[0.06, 0.03, 0.08]} />
-                  <meshStandardMaterial color="#94a3b8" metalness={0.9} roughness={0.1} />
-                </mesh>
-              ))}
-            </group>
-          )
-        })}
-      </group>
-
-      {/* Shaft Coupling Sleeve */}
-      <mesh position={[0.6, 1.4, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.18, 0.18, 0.4, 16]} />
-        <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
-      </mesh>
-
-      {/* Heavy-Duty Electric Generator Nacelle */}
-      <mesh position={[1.4, 1.4, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.65, 0.65, 1.4, 20]} />
-        <meshStandardMaterial color="#0369a1" metalness={0.65} roughness={0.3} />
-      </mesh>
-      {/* Generator Cooling Stator Ribs */}
-      {[-0.4, -0.2, 0, 0.2, 0.4].map((zOffset, i) => (
-        <mesh key={i} position={[1.4, 1.4, zOffset]} rotation={[0, 0, Math.PI / 2]}>
-          <torusGeometry args={[0.66, 0.02, 8, 24]} />
-          <meshStandardMaterial color="#0284c7" metalness={0.8} roughness={0.2} />
-        </mesh>
-      ))}
-      {/* Exciter / Terminal Box */}
-      <mesh position={[1.4, 2.15, 0]}>
-        <boxGeometry args={[0.5, 0.25, 0.4]} />
-        <meshStandardMaterial color="#10b981" metalness={0.6} roughness={0.3} />
-      </mesh>
-
-      {/* Rigid Cast Foundation Base */}
-      <mesh position={[0.4, 0.2, 0]}>
-        <boxGeometry args={[3.2, 0.4, 1.6]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.4} />
-      </mesh>
-
-      <Text position={[0.4, 3.0, 0]} fontSize={0.24} color="#60a5fa" anchorX="center" fontWeight="bold">
-        STEAM TURBINE & GENERATOR
-      </Text>
-      <Text position={[0.4, 2.65, 0]} fontSize={0.16} color="#38bdf8" anchorX="center">
-        {powerKw.toFixed(1)} kWe Net Export
-      </Text>
-    </group>
-  )
-}
-
-// 8. CHP Heat Exchanger Component
-interface HeatExchangerProps {
-  recoveredHeatKw: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  onSelect: () => void
-  selected: boolean
-}
-
-function HeatExchanger({
-  recoveredHeatKw,
-  running,
-  paused,
-  reducedMotion,
-  onSelect,
-  selected,
-}: HeatExchangerProps) {
-  const hotRef = useRef<THREE.Group>(null)
-  const coldRef = useRef<THREE.Group>(null)
-
-  useFrame((_, delta) => {
-    if (running && !paused && !reducedMotion) {
-      const speed = Math.min(2.5, Math.max(0.4, (recoveredHeatKw / 860) * 0.8))
-      hotRef.current?.children.forEach((p) => {
-        p.position.x -= delta * speed
-        if (p.position.x < -1.1) p.position.x = 1.1
-      })
-      coldRef.current?.children.forEach((p) => {
-        p.position.x += delta * speed
-        if (p.position.x > 1.1) p.position.x = -1.1
-      })
-    }
-  })
-
-  return (
-    <group position={[11.0, 0, 0]} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
-      {/* Selection Ring */}
-      {selected && (
-        <mesh position={[0, -0.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.5, 1.7, 32]} />
-          <meshBasicMaterial color="#34d399" side={THREE.DoubleSide} />
-        </mesh>
-      )}
-
-      {/* Condenser Shell */}
-      <mesh position={[0, 1.3, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.65, 0.65, 2.4, 20]} />
-        <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.25} />
-      </mesh>
-      {/* Flanged Headers */}
-      <mesh position={[-1.25, 1.3, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.72, 0.72, 0.1, 20]} />
-        <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
-      </mesh>
-      <mesh position={[1.25, 1.3, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.72, 0.72, 0.1, 20]} />
-        <meshStandardMaterial color="#475569" metalness={0.8} roughness={0.2} />
-      </mesh>
-
-      {/* Hot Stream Particles (Condensing Steam) */}
-      <group ref={hotRef}>
-        {Array.from({ length: 8 }).map((_, i) => (
-          <mesh key={i} position={[i * 0.3 - 1.0, 1.3, i % 2 === 0 ? 0.2 : -0.2]}>
-            <sphereGeometry args={[0.045, 6, 6]} />
-            <meshStandardMaterial color="#f43f5e" emissive="#f43f5e" emissiveIntensity={0.6} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* Cold Stream Particles (District Water Inflow) */}
-      <group ref={coldRef}>
-        {Array.from({ length: 8 }).map((_, i) => (
-          <mesh key={i} position={[i * 0.3 - 1.0, 1.3, i % 2 === 0 ? 0.35 : -0.35]}>
-            <sphereGeometry args={[0.045, 6, 6]} />
-            <meshStandardMaterial color="#06b6d4" emissive="#06b6d4" emissiveIntensity={0.6} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* Foundation Pedestals */}
-      <mesh position={[-0.6, 0.35, 0]}>
-        <boxGeometry args={[0.15, 0.7, 0.9]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
-      </mesh>
-      <mesh position={[0.6, 0.35, 0]}>
-        <boxGeometry args={[0.15, 0.7, 0.9]} />
-        <meshStandardMaterial color="#1e293b" metalness={0.7} roughness={0.3} />
-      </mesh>
-
-      <Text position={[0, 2.5, 0]} fontSize={0.24} color="#34d399" anchorX="center" fontWeight="bold">
-        CHP HEAT EXCHANGER
-      </Text>
-      <Text position={[0, 2.15, 0]} fontSize={0.16} color="#6ee7b7" anchorX="center">
-        {recoveredHeatKw.toFixed(1)} kWth Useful District Heat
-      </Text>
-    </group>
-  )
-}
-
-// 9. Connecting Process Pipes with Flow Scaled by Real kW
-interface PipesProps {
-  syngasKw: number
-  steamKw: number
-  condenserKw: number
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-}
-
-function ConnectingPipes({
-  syngasKw,
-  steamKw,
-  condenserKw,
-  running,
-  paused,
-  reducedMotion,
-}: PipesProps) {
-  const syngasFlowRef = useRef<THREE.Group>(null)
-  const steamFlowRef = useRef<THREE.Group>(null)
-  const condenserFlowRef = useRef<THREE.Group>(null)
-
-  useFrame((_, delta) => {
-    if (running && !paused && !reducedMotion) {
-      // 1. Syngas line flow pulse (speed proportional to syngas thermal kW)
-      if (syngasFlowRef.current) {
-        const speed = Math.min(3, Math.max(0.4, (syngasKw / 1490) * 1.2))
-        syngasFlowRef.current.children.forEach((p) => {
-          p.position.x += delta * speed
-          if (p.position.x > 3.5) p.position.x = 0
-        })
-      }
-      // 2. High-pressure steam line flow pulse
-      if (steamFlowRef.current) {
-        const speed = Math.min(3, Math.max(0.4, (steamKw / 1267) * 1.2))
-        steamFlowRef.current.children.forEach((p) => {
-          p.position.x += delta * speed
-          if (p.position.x > 6.8) p.position.x = 3.6
-        })
-      }
-      // 3. Condenser line flow pulse
-      if (condenserFlowRef.current) {
-        const speed = Math.min(3, Math.max(0.4, (condenserKw / 1069) * 1.2))
-        condenserFlowRef.current.children.forEach((p) => {
-          p.position.x += delta * speed
-          if (p.position.x > 10.8) p.position.x = 7.6
-        })
-      }
-    }
-  })
-
-  return (
-    <group>
-      {/* 1. Feed chute: Conveyor to Gasifier */}
-      <mesh position={[-4.5, 0.8, 0]} rotation={[0, 0, Math.PI / 12]}>
-        <boxGeometry args={[2, 0.1, 0.1]} />
-        <meshStandardMaterial color="#475569" metalness={0.7} roughness={0.3} />
-      </mesh>
-
-      {/* 2. Syngas transfer line: Gasifier dome to Boiler inlet */}
-      <mesh position={[1.25, 3.8, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.12, 0.12, 4.2, 12]} />
-        <meshStandardMaterial color="#f59e0b" metalness={0.7} roughness={0.3} />
-      </mesh>
-      {/* Syngas flow particles */}
-      <group ref={syngasFlowRef} position={[0, 3.8, 0]}>
-        {Array.from({ length: 6 }).map((_, i) => (
-          <mesh key={i} position={[i * 0.65, 0, 0]}>
-            <sphereGeometry args={[0.05, 6, 6]} />
-            <meshStandardMaterial color="#fde047" emissive="#f59e0b" emissiveIntensity={0.8} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* 3. High-pressure steam line: Boiler to Turbine HP inlet */}
-      <mesh position={[5.25, 2.85, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.1, 0.1, 3.2, 12]} />
-        <meshStandardMaterial color="#94a3b8" metalness={0.8} roughness={0.2} />
-      </mesh>
-      {/* Steam flow particles */}
-      <group ref={steamFlowRef}>
-        {Array.from({ length: 5 }).map((_, i) => (
-          <mesh key={i} position={[3.8 + i * 0.65, 2.85, 0]}>
-            <sphereGeometry args={[0.045, 6, 6]} />
-            <meshStandardMaterial color="#ffffff" emissive="#38bdf8" emissiveIntensity={0.6} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* 4. Turbine exhaust to Heat Exchanger condenser */}
-      <mesh position={[9.2, 1.3, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.14, 0.14, 3.2, 12]} />
-        <meshStandardMaterial color="#64748b" metalness={0.7} roughness={0.3} />
-      </mesh>
-      {/* Condenser flow particles */}
-      <group ref={condenserFlowRef}>
-        {Array.from({ length: 5 }).map((_, i) => (
-          <mesh key={i} position={[7.8 + i * 0.65, 1.3, 0]}>
-            <sphereGeometry args={[0.045, 6, 6]} />
-            <meshStandardMaterial color="#f43f5e" emissive="#f43f5e" emissiveIntensity={0.5} />
-          </mesh>
-        ))}
-      </group>
-    </group>
-  )
-}
-
-// 10. Floor Ground
-function Ground() {
-  return (
-    <group position={[2, -0.16, 0]}>
-      <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <planeGeometry args={[42, 18]} />
-        <meshStandardMaterial color="#090d16" roughness={0.85} metalness={0.2} />
-      </mesh>
-      <gridHelper args={[42, 42, '#0284c7', '#1e293b']} position={[0, 0.01, 0]} />
-    </group>
-  )
-}
-
-// ── Complete 3D Scene Assembly ────────────────────────────────
-interface SceneProps {
-  data: SimulationResult | null
-  running: boolean
-  paused: boolean
-  reducedMotion: boolean
-  onSelectComponent: (comp: string) => void
-  selectedComponent: string | null
-}
-
-function PlantScene({
-  data,
-  running,
-  paused,
-  reducedMotion,
-  onSelectComponent,
-  selectedComponent,
-}: SceneProps) {
-  const temp = data?.parameters?.reactor_temp_c ?? 850
-  const power = data?.turbine?.electrical_power_kw ?? 178.6
-  const steamFlow = data?.steam_cycle?.steam_flow_kg_h ?? 1547
-  const recoveredHeat = data?.heat_exchanger?.recovered_heat_kw ?? 863.1
-
-  // Dynamic fluidization values
-  const u0_over_umf_eff = data?.fluidization?.u0_over_umf_eff ?? (data?.u0_over_umf_eff ?? 10.05)
-  const u0_over_ut = data?.fluidization?.u0_over_ut ?? (data?.u0_over_ut ?? 0.20)
-  const d_eff_m = data?.fluidization?.d_eff_m ?? 0.0004
-  const u0_m_s = data?.fluidization?.u0_m_s ?? 0.567
-  const umf_eff_m_s = data?.fluidization?.umf_effective_m_s ?? 0.056
-
-  const syngasKw = data?.gasification?.thermal_energy_kw ?? 1490.4
-  const steamKw = data?.steam_cycle?.boiler_duty_kw ?? 1266.8
-  const condenserKw = data?.heat_exchanger?.condenser_heat_kw ?? 1068.9
-
-  return (
-    <>
-      <color attach="background" args={['#060911']} />
-      <fog attach="fog" args={['#060911', 20, 48]} />
-      <PerspectiveCamera makeDefault position={[1.5, 6.5, 16.5]} fov={44} />
-      <OrbitControls enableDamping dampingFactor={0.08} minDistance={5} maxDistance={36} />
-
-      <ambientLight intensity={0.8} />
-      <directionalLight position={[12, 18, 14]} intensity={1.2} castShadow />
-      <directionalLight position={[-10, 14, -8]} intensity={0.5} />
-      <pointLight position={[-1, 3.8, 2.5]} intensity={1.4} color="#f59e0b" distance={12} />
-      <pointLight position={[3.5, 3.8, 2.5]} intensity={1.1} color="#38bdf8" distance={10} />
-      <pointLight position={[7.2, 3.0, 2.5]} intensity={1.1} color="#60a5fa" distance={10} />
-
-      <Ground />
-      <Conveyor running={running} paused={paused} />
-      <WasteObjects running={running} paused={paused} />
-      <AICamera />
-      <Gasifier
-        temperature={temp}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-        u0_over_umf_eff={u0_over_umf_eff}
-        u0_over_ut={u0_over_ut}
-        d_eff_m={d_eff_m}
-        u0_m_s={u0_m_s}
-        umf_eff_m_s={umf_eff_m_s}
-        onSelect={() => onSelectComponent('gasifier')}
-        selected={selectedComponent === 'gasifier'}
-      />
-      <Boiler
-        steamFlow={steamFlow}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-        onSelect={() => onSelectComponent('boiler')}
-        selected={selectedComponent === 'boiler'}
-      />
-      <Turbine
-        powerKw={power}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-        onSelect={() => onSelectComponent('turbine')}
-        selected={selectedComponent === 'turbine'}
-      />
-      <HeatExchanger
-        recoveredHeatKw={recoveredHeat}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-        onSelect={() => onSelectComponent('heat_exchanger')}
-        selected={selectedComponent === 'heat_exchanger'}
-      />
-      <ConnectingPipes
-        syngasKw={syngasKw}
-        steamKw={steamKw}
-        condenserKw={condenserKw}
-        running={running}
-        paused={paused}
-        reducedMotion={reducedMotion}
-      />
-    </>
-  )
-}
+import { PlantScene } from '../components/simulation3d/PlantScene'
+import { CAMERA_PRESETS, type CameraPreset } from '../components/simulation3d/types'
 
 // ── Baseline Demo Data for Instant Chart Feedback ─────────────
 const BASELINE_DATA = [
@@ -1049,7 +28,6 @@ const BASELINE_DATA = [
   { time: 4, temperature: 852, pressure: 8.59, power: 178.9, airflow: 662, heat: 863.7, efficiency: 39.9 },
 ]
 
-// ── Main SimulationPage Component ─────────────────────────────
 export default function SimulationPage() {
   const [running, setRunning] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -1061,6 +39,7 @@ export default function SimulationPage() {
   const [selectedComponent, setSelectedComponent] = useState<string | null>(null)
   const [agglomerationIndex, setAgglomerationIndex] = useState<number>(0.0)
   const [mitigationNotice, setMitigationNotice] = useState<string | null>(null)
+  const [cameraPreset, setCameraPreset] = useState<CameraPreset>('overview')
 
   // Accessibility: prefers-reduced-motion
   const [reducedMotion, setReducedMotion] = useState(false)
@@ -1292,22 +271,46 @@ export default function SimulationPage() {
       <div className="flex-1 flex overflow-hidden relative">
         {/* 3D Viewport Area */}
         <div className="flex-1 relative bg-slate-950">
-          <Canvas>
+          <Canvas shadows>
             <Suspense fallback={null}>
               <PlantScene
                 data={data}
                 running={running}
                 paused={paused}
                 reducedMotion={reducedMotion}
+                cameraPreset={cameraPreset}
                 onSelectComponent={(comp) => setSelectedComponent(comp)}
                 selectedComponent={selectedComponent}
               />
             </Suspense>
           </Canvas>
 
-          {/* Floating High-Contrast HUD Telemetry (Task 7) */}
+          {/* ── Camera Preset Buttons with Smooth Transitions ─────────── */}
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center p-1 rounded-xl bg-slate-900/90 border border-white/20 backdrop-blur-md shadow-xl z-10 gap-1">
+            {(['overview', 'gasifier', 'steam_cycle', 'feed_line'] as CameraPreset[]).map((presetKey) => {
+              const cfg = CAMERA_PRESETS[presetKey]
+              const isActive = cameraPreset === presetKey
+              return (
+                <button
+                  key={presetKey}
+                  onClick={() => setCameraPreset(presetKey)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    isActive
+                      ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
+                      : 'text-slate-300 hover:text-white hover:bg-white/10'
+                  }`}
+                  title={cfg.description}
+                >
+                  <Camera size={12} className={isActive ? 'text-white' : 'text-slate-400'} />
+                  <span>{cfg.label}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Floating High-Contrast HUD Telemetry */}
           {data ? (
-            <div className="absolute top-4 left-4 grid grid-cols-2 sm:grid-cols-3 gap-2 pointer-events-none z-10 max-w-xl">
+            <div className="absolute top-16 left-4 grid grid-cols-2 sm:grid-cols-3 gap-2 pointer-events-none z-10 max-w-xl">
               {[
                 {
                   label: 'Bed Temp',
@@ -1368,7 +371,7 @@ export default function SimulationPage() {
               ))}
             </div>
           ) : (
-            <div className="absolute top-4 left-4 px-3.5 py-2 rounded-lg bg-slate-900/90 backdrop-blur-md border border-white/15 text-xs font-mono text-slate-200 pointer-events-none flex items-center gap-2 shadow-sm">
+            <div className="absolute top-16 left-4 px-3.5 py-2 rounded-lg bg-slate-900/90 backdrop-blur-md border border-white/15 text-xs font-mono text-slate-200 pointer-events-none flex items-center gap-2 shadow-sm">
               <span className="w-2 h-2 rounded-full bg-emerald-400" />
               <span>Standby: Ready to stream live physics & telemetry. Click [Start Run]</span>
             </div>
@@ -1376,7 +379,7 @@ export default function SimulationPage() {
 
           {/* Quick Component Inspector Picker Badge */}
           <div className="absolute top-4 right-4 flex items-center gap-1.5 z-10">
-            {['gasifier', 'boiler', 'turbine', 'heat_exchanger'].map((c) => (
+            {['feed_line', 'gasifier', 'boiler', 'turbine', 'heat_exchanger'].map((c) => (
               <button
                 key={c}
                 onClick={() => setSelectedComponent(selectedComponent === c ? null : c)}
@@ -1391,9 +394,9 @@ export default function SimulationPage() {
             ))}
           </div>
 
-          {/* Interactive Click-to-Inspect Overlay Panel (Task 6) */}
+          {/* Interactive Click-to-Inspect Overlay Panel */}
           {selectedComponent && (
-            <div className="absolute bottom-20 left-4 z-20 w-80 glass-panel bg-slate-900/95 border border-white/20 p-3.5 rounded-xl shadow-xl space-y-2.5 text-xs">
+            <div className="absolute bottom-20 left-4 z-20 w-84 glass-panel bg-slate-900/95 border border-white/20 p-3.5 rounded-xl shadow-xl space-y-2.5 text-xs">
               <div className="flex items-center justify-between pb-1.5 border-b border-white/15">
                 <div className="flex items-center gap-2">
                   <Eye size={14} className="text-cyan-400" />
@@ -1408,6 +411,35 @@ export default function SimulationPage() {
                   <X size={14} />
                 </button>
               </div>
+
+              {selectedComponent === 'feed_line' && (
+                <div className="space-y-1.5 font-mono text-[11px]">
+                  <div className="flex justify-between py-0.5 border-b border-white/5">
+                    <span className="text-slate-400">Waste Feed Rate:</span>
+                    <span className="text-white font-bold">{data?.parameters?.waste_feed_kg_h ?? 500} kg/h</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 border-b border-white/5">
+                    <span className="text-slate-400">Plastic Fraction:</span>
+                    <span className="text-cyan-400 font-bold">{((data?.parameters?.plastic_ratio ?? 0.25) * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 border-b border-white/5">
+                    <span className="text-slate-400">Moisture Content:</span>
+                    <span className="text-white font-bold">{data?.parameters?.moisture_pct ?? 15.0}%</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 border-b border-white/5">
+                    <span className="text-slate-400">Feeder Auger:</span>
+                    <span className="text-emerald-400 font-bold">Closed Chute / Screw Active</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 border-b border-white/5">
+                    <span className="text-slate-400">Optical Scanner:</span>
+                    <span className="text-amber-400 font-bold">Schematic (not live YOLO)</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-slate-400">Source JSON Field:</span>
+                    <span className="text-slate-300 text-[10px]">parameters.waste_feed_kg_h & plastic_ratio</span>
+                  </div>
+                </div>
+              )}
 
               {selectedComponent === 'gasifier' && (
                 <div className="space-y-1.5 font-mono text-[11px]">
@@ -1533,7 +565,7 @@ export default function SimulationPage() {
 
           {/* Mitigation feedback toast */}
           {mitigationNotice && (
-            <div className="absolute top-20 inset-x-8 z-30 p-2.5 rounded-lg bg-emerald-950/90 border border-emerald-500/50 text-emerald-200 text-xs font-mono flex items-center justify-between shadow-lg backdrop-blur-md">
+            <div className="absolute top-28 inset-x-8 z-30 p-2.5 rounded-lg bg-emerald-950/90 border border-emerald-500/50 text-emerald-200 text-xs font-mono flex items-center justify-between shadow-lg backdrop-blur-md">
               <div className="flex items-center gap-2">
                 <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
                 <span>{mitigationNotice}</span>
@@ -1544,7 +576,7 @@ export default function SimulationPage() {
             </div>
           )}
 
-          {/* Primary Physics Fault Banner & Experimental ML Warning (Tasks 4 & 5) */}
+          {/* Primary Physics Fault Banner & Experimental ML Warning */}
           {data && (
             <div className="absolute bottom-4 inset-x-4 p-3 rounded-xl glass-card border border-white/15 bg-slate-900/90 backdrop-blur-lg flex flex-col md:flex-row md:items-center justify-between gap-3 z-10 shadow-lg">
               <div className="space-y-1">
