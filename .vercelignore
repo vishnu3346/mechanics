@@ -1,0 +1,17 @@
+backend/
+models/
+weights/
+data/
+archive (2)/
+medical waste.v2i.yolov8/
+tests/
+venv/
+.venv/
+screenshots/
+tmp_chrome/
+runs/
+*.pth
+*.pt
+*.db
+*.pyc
+__pycache__/
