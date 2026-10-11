@@ -14,3 +14,5 @@ archive (2)/
 *.tsbuildinfo
 data/
 .vercel/
+.vercel
+.env*
