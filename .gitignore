@@ -11,3 +11,4 @@ runs/
 dist/
 medical waste.v2i.yolov8/
 archive (2)/
+*.tsbuildinfo
