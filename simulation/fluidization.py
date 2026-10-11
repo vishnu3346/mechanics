@@ -62,6 +62,7 @@ class FluidizationConfig:
     t_softening_c: float = 750.0  # ASSUMPTION: Polymer/ash softening & sticking onset temperature (°C)
     k_coating_plastic: float = 2.0  # ASSUMPTION: Plastic sensitivity factor for particle coating
     k_coating_temp: float = 0.5     # ASSUMPTION: Thermal excess sensitivity factor per 100 K above softening
+    k_agglomeration_diameter: float = 5.0  # ASSUMPTION: Maximum diameter growth scale at agglomeration_index = 1.0 (d_eff = d_p * (1 + k_agg * a))
 
 
 @dataclass
@@ -92,17 +93,26 @@ class FluidizationResult:
     dp_bed_kpa: float = 0.0      # Fluidized bed pressure drop (buoyant weight per area) (kPa)
     dp_distributor_kpa: float = 0.0  # Distributor plate pressure drop (kPa)
     dp_total_kpa: float = 0.0    # Total reactor pressure drop (bed + distributor) (kPa)
+    dp_ratio: float = 1.0        # Ratio of actual fluidized bed drop to expected buoyant plateau (dP_bed / dP_expected)
 
     # Bubble dynamics
     bubble_diameter_m: float = 0.0  # Equivalent bubble diameter at bed surface (m)
     bubble_velocity_m_s: float = 0.0  # Absolute bubble rise velocity (m/s)
     regime: str = "bubbling"     # Hydrodynamic regime: 'fixed', 'bubbling', 'turbulent', 'entrained'
 
-    # Defluidization / agglomeration proxy model
-    d_eff: float = 0.0           # Effective coated particle diameter (m)
-    umf_effective: float = 0.0   # Effective minimum fluidization velocity with d_eff (m/s)
+    # Defluidization / agglomeration model
+    agglomeration_index: float = 0.0    # Sintering / agglomeration index [0.0 = clean bed, 1.0 = fully agglomerated]
+    d_eff: float = 0.0                  # Effective coated / agglomerated particle diameter (m)
+    umf_effective: float = 0.0          # Effective minimum fluidization velocity with d_eff (m/s)
     defluidization_margin: float = 0.0  # Operating margin U0 / Umf_effective
+    u0_over_umf_eff: float = 0.0        # Same as defluidization_margin (U0 / Umf_effective)
+    u0_over_ut: float = 0.0             # Operating velocity relative to terminal velocity (U0 / Ut)
     defluidization_risk: float = 0.0    # Defluidization risk index [0.0 = safe, 1.0 = defluidized/critical]
+
+    # Physics state classification
+    physics_state: str = "NORMAL_FLUIDIZATION"
+    physics_risk_level: str = "LOW"
+    physics_reason: str = ""
 
     # Diagnostics
     valid: bool = True
@@ -460,27 +470,122 @@ def determine_fluidization_regime(u0: float, umf: float, ut: float) -> str:
         return "bubbling"
 
 
+def classify_physics_state(
+    u0: float,
+    umf_eff: float,
+    ut: float,
+    dp_bed: float,
+    dp_expected: float,
+    temp_c: float,
+) -> Tuple[str, str, str]:
+    """
+    Define state labels purely from physics quantities:
+      - U0 / Umf_eff (fluidization margin vs effective agglomerated Umf)
+      - U0 / Ut (entrainment / terminal velocity ratio)
+      - dP_bed / dP_expected (bed pressure drop plateau ratio vs buoyant bed weight)
+      - temp_c margins (relative to polymer softening, tar condensation, and ash fusion)
+
+    Returns:
+      (state, risk_level, physical_reason)
+    """
+    u0_over_umf = u0 / umf_eff if umf_eff > 0 else 0.0
+    u0_over_ut = u0 / ut if ut > 0 else 0.0
+    dp_ratio = dp_bed / dp_expected if dp_expected > 0 else 1.0
+
+    # 1. SEVERE_CLUMPING / CRITICAL DEFLUIDIZATION:
+    if u0_over_umf < 1.0:
+        return (
+            "SEVERE_CLUMPING",
+            "CRITICAL",
+            f"Defluidization: superficial velocity U0 ({u0:.3f} m/s) < Umf_eff ({umf_eff:.3f} m/s) (U0/Umf_eff = {u0_over_umf:.3f} < 1.0); agglomerated bed collapsed into fixed state."
+        )
+    if u0_over_ut >= 0.75:
+        return (
+            "SEVERE_CLUMPING",
+            "CRITICAL",
+            f"Terminal blowout: U0/Ut = {u0_over_ut:.3f} >= 0.75; superficial velocity exceeds stable bubbling window causing massive elutriation."
+        )
+    if dp_ratio < 0.60:
+        return (
+            "SEVERE_CLUMPING",
+            "CRITICAL",
+            f"Severe gas channeling: dP_bed/dP_expected = {dp_ratio:.3f} < 0.60; gas channeling through collapsed bed without solids suspension."
+        )
+    if temp_c < 650.0:
+        return (
+            "SEVERE_CLUMPING",
+            "CRITICAL",
+            f"Thermal flameout: bed temperature {temp_c:.1f} °C < 650 °C; insufficient heat for autothermal gasification."
+        )
+    if temp_c > 1020.0:
+        return (
+            "SEVERE_CLUMPING",
+            "CRITICAL",
+            f"Thermal runaway sintering: bed temperature {temp_c:.1f} °C > 1020 °C; severe mineral/ash fusion and bulk clinkering."
+        )
+
+    # 2. EARLY_AGGLOMERATION / DEGRADED MARGIN:
+    if u0_over_umf < 2.0:
+        return (
+            "EARLY_AGGLOMERATION",
+            "MEDIUM",
+            f"Incipient defluidization: U0/Umf_eff = {u0_over_umf:.3f} < 2.0; operating below safe bubbling margin (U0 >= 2 Umf) with growing cluster size."
+        )
+    if u0_over_ut >= 0.50:
+        return (
+            "EARLY_AGGLOMERATION",
+            "MEDIUM",
+            f"High velocity slugging: U0/Ut = {u0_over_ut:.3f} >= 0.50; transition toward turbulent fluidization with elevated fines carryover."
+        )
+    if dp_ratio < 0.85:
+        return (
+            "EARLY_AGGLOMERATION",
+            "MEDIUM",
+            f"Partial gas channeling: dP_bed/dP_expected = {dp_ratio:.3f} < 0.85; localized bed bypassing and stagnant dead zones."
+        )
+    if temp_c < 750.0:
+        return (
+            "EARLY_AGGLOMERATION",
+            "MEDIUM",
+            f"Cold bed margin: bed temperature {temp_c:.1f} °C < 750 °C (softening point); elevated tar condensation risk."
+        )
+    if temp_c > 930.0:
+        return (
+            "EARLY_AGGLOMERATION",
+            "MEDIUM",
+            f"Thermal margin warning: bed temperature {temp_c:.1f} °C > 930 °C; incipient polymer softening and accelerated particle coating."
+        )
+
+    # 3. NORMAL_FLUIDIZATION / STABLE OPERATION:
+    return (
+        "NORMAL_FLUIDIZATION",
+        "LOW",
+        f"Stable bubbling fluidization: U0/Umf_eff = {u0_over_umf:.3f} >= 2.0, U0/Ut = {u0_over_ut:.3f} < 0.50, dP_bed ratio = {dp_ratio:.3f}, T = {temp_c:.1f} °C."
+    )
+
+
 def calculate_defluidization_model(
     u0: float,
     umf_nominal: float,
     plastic_fraction: float,
     temp_c: float,
-    config: FluidizationConfig = None
+    config: FluidizationConfig = None,
+    agglomeration_index: Optional[float] = None,
+    d_p: Optional[float] = None,
 ) -> Tuple[float, float, float, float]:
     """
-    Simplified engineering proxy model for bed defluidization and agglomeration risk.
-    Documented Plainly: This is a simplified engineering proxy model, NOT first-principles
-    molten polymer agglomeration kinetics.
+    Bed agglomeration and defluidization model.
+    Reuses existing Ergun/Wen-Yu minimum fluidization formulation with effective diameter d_eff.
 
     Mechanism:
-      High plastic content and elevated bed temperature above polymer softening/pyrolysis
-      sticking point (~750 °C) create a sticky coating on bed sand grains, increasing
-      effective particle diameter d_eff.
-      d_eff = d_p * (1 + coating_factor)
-      coating_factor = k_plastic * w_plastic * (1 + k_temp * (max(0, T - T_soft) / 100))
-      Umf_eff is recalculated using d_eff.
-      Defluidization margin = U0 / Umf_eff
-      Risk index in [0, 1]: rises as margin approaches and falls below 1.0.
+      - If agglomeration_index (a in [0, 1]) is provided:
+          d_eff = d_p * (1 + k_agglomeration_diameter * a)
+      - If agglomeration_index is None, proxy model based on plastic and temperature is used:
+          coating_factor = k_plastic * w_plastic * (1 + k_temp * (max(0, T - T_soft) / 100))
+          d_eff = d_p * (1 + coating_factor)
+      - Umf_eff is recalculated using Wen-Yu (and Ergun consistent) with d_eff.
+      - Defluidization margin = U0 / Umf_eff
+      - Defluidization risk in [0, 1]: 0.0 (safe) when margin >= 2.0; 1.0 (critical) when margin <= 1.0.
 
     Returns:
       (d_eff, umf_effective, defluidization_margin, defluidization_risk)
@@ -488,15 +593,19 @@ def calculate_defluidization_model(
     if config is None:
         config = FluidizationConfig()
 
-    w_plastic = max(0.0, min(1.0, plastic_fraction))
-    delta_t = max(0.0, temp_c - config.t_softening_c)
+    base_dp = d_p if d_p is not None else config.d_p
 
-    # Simplified coating factor (ASSUMPTION)
-    coating_factor = config.k_coating_plastic * w_plastic * (
-        1.0 + config.k_coating_temp * (delta_t / 100.0)
-    )
-
-    d_eff = config.d_p * (1.0 + coating_factor)
+    if agglomeration_index is not None:
+        a_idx = max(0.0, min(1.0, float(agglomeration_index)))
+        growth = config.k_agglomeration_diameter * a_idx
+        d_eff = base_dp * (1.0 + growth)
+    else:
+        w_plastic = max(0.0, min(1.0, plastic_fraction))
+        delta_t = max(0.0, temp_c - config.t_softening_c)
+        coating_factor = config.k_coating_plastic * w_plastic * (
+            1.0 + config.k_coating_temp * (delta_t / 100.0)
+        )
+        d_eff = base_dp * (1.0 + coating_factor)
 
     # Recalculate Umf using Wen-Yu with effective diameter
     rho_g = calculate_gas_density(temp_c, config.p_ref_kpa, config)
@@ -523,7 +632,9 @@ def calculate_fluidization(
     reactor_temp_c: float = 850.0,
     pressure_kpa: float = 101.325,
     plastic_ratio: float = 0.20,
-    config: FluidizationConfig = None
+    config: FluidizationConfig = None,
+    agglomeration_index: Optional[float] = None,
+    d_p: Optional[float] = None,
 ) -> FluidizationResult:
     """
     Main calculation entry point for reactor fluidization hydrodynamics.
@@ -534,12 +645,16 @@ def calculate_fluidization(
       pressure_kpa: Reactor absolute operating pressure (kPa)
       plastic_ratio: Feedstock plastic mass fraction (0 to 1)
       config: Reactor hydrodynamic design configuration
+      agglomeration_index: Optional explicit particle agglomeration index [0.0 to 1.0]
+      d_p: Optional base particle diameter override (m)
 
     Returns:
       FluidizationResult with full hydrodynamic state.
     """
     if config is None:
         config = FluidizationConfig()
+
+    base_dp = d_p if d_p is not None else config.d_p
 
     res = FluidizationResult()
 
@@ -565,19 +680,19 @@ def calculate_fluidization(
 
     # 3. Archimedes number
     res.archimedes = calculate_archimedes(
-        config.d_p, config.rho_p, res.rho_g, res.mu_g, config.g
+        base_dp, config.rho_p, res.rho_g, res.mu_g, config.g
     )
 
     # 4. Minimum fluidization velocities (Wen-Yu and Ergun)
     res.umf_wen_yu, res.re_mf_wen_yu = calculate_umf_wen_yu(
-        config.d_p, config.rho_p, res.rho_g, res.mu_g, config.g
+        base_dp, config.rho_p, res.rho_g, res.mu_g, config.g
     )
     res.umf_ergun = calculate_umf_ergun(
-        config.d_p, config.rho_p, res.rho_g, res.mu_g,
+        base_dp, config.rho_p, res.rho_g, res.mu_g,
         config.sphericity, config.eps_mf, config.g
     )
     # Re_mf Ergun
-    res.re_mf_ergun = res.rho_g * res.umf_ergun * config.d_p / res.mu_g if res.mu_g > 0 else 0.0
+    res.re_mf_ergun = res.rho_g * res.umf_ergun * base_dp / res.mu_g if res.mu_g > 0 else 0.0
 
     # Percent difference relative to Ergun Umf
     if res.umf_ergun > 0:
@@ -586,11 +701,11 @@ def calculate_fluidization(
         res.umf_diff_pct = 0.0
 
     # Particle Reynolds number at operating U0
-    res.re_p = res.rho_g * res.u0 * config.d_p / res.mu_g if res.mu_g > 0 else 0.0
+    res.re_p = res.rho_g * res.u0 * base_dp / res.mu_g if res.mu_g > 0 else 0.0
 
     # 5. Terminal velocity (Haider & Levenspiel 1989)
     res.ut = calculate_terminal_velocity_haider_levenspiel(
-        config.d_p, config.rho_p, res.rho_g, res.mu_g, config.sphericity, config.g
+        base_dp, config.rho_p, res.rho_g, res.mu_g, config.sphericity, config.g
     )
 
     # 6. Stability window & ratio
@@ -599,39 +714,62 @@ def calculate_fluidization(
     res.is_stable_window = (umf_ref < res.u0 < res.ut)
 
     # 7. Geldart group
-    res.geldart_group = classify_geldart_group(config.d_p, config.rho_p, res.rho_g)
+    res.geldart_group = classify_geldart_group(base_dp, config.rho_p, res.rho_g)
 
-    # 8. Pressure drops
-    res.dp_bed_kpa, res.dp_distributor_kpa, res.dp_total_kpa = calculate_bed_pressure_drop(
-        config.bed_height, config.eps_mf, config.rho_p, res.rho_g,
-        config.distributor_dp_ratio, config.g
-    )
-
-    # If U0 < Umf, bed is unfluidized: pressure drop follows Ergun ramp
-    if res.u0 < umf_ref and umf_ref > 0:
-        fixed_bed_dp = calculate_fixed_bed_dp_ergun(
-            res.u0, config.bed_height, config.d_p, config.eps_mf,
-            res.rho_g, res.mu_g, config.sphericity
-        )
-        res.dp_bed_kpa = min(res.dp_bed_kpa, fixed_bed_dp)
-        dist_factor = (res.u0 / umf_ref) ** 2
-        res.dp_distributor_kpa = res.dp_distributor_kpa * dist_factor
-        res.dp_total_kpa = res.dp_bed_kpa + res.dp_distributor_kpa
-
-    # 9. Bubble properties & regime
-    res.bubble_diameter_m, res.bubble_velocity_m_s = calculate_bubble_properties(
-        res.u0, umf_ref, config.bed_height, config
-    )
-    res.regime = determine_fluidization_regime(res.u0, umf_ref, res.ut)
-
-    # 10. Defluidization / clumping proxy model
+    # 8. Defluidization / agglomeration model
     (
         res.d_eff,
         res.umf_effective,
         res.defluidization_margin,
         res.defluidization_risk
     ) = calculate_defluidization_model(
-        res.u0, umf_ref, plastic_ratio, reactor_temp_c, config
+        res.u0, umf_ref, plastic_ratio, reactor_temp_c, config,
+        agglomeration_index=agglomeration_index, d_p=base_dp
+    )
+    if agglomeration_index is not None:
+        res.agglomeration_index = max(0.0, min(1.0, float(agglomeration_index)))
+    else:
+        res.agglomeration_index = min(1.0, max(0.0, (res.d_eff / base_dp - 1.0) / config.k_agglomeration_diameter))
+
+    res.u0_over_umf_eff = res.defluidization_margin
+    res.u0_over_ut = res.u0 / res.ut if res.ut > 0 else 0.0
+
+    # 9. Pressure drops
+    expected_dp_bed_kpa, expected_dist_kpa, _ = calculate_bed_pressure_drop(
+        config.bed_height, config.eps_mf, config.rho_p, res.rho_g,
+        config.distributor_dp_ratio, config.g
+    )
+    res.dp_bed_kpa = expected_dp_bed_kpa
+    res.dp_distributor_kpa = expected_dist_kpa
+    res.dp_total_kpa = res.dp_bed_kpa + res.dp_distributor_kpa
+
+    # If U0 < Umf, bed is unfluidized: pressure drop follows Ergun ramp
+    if res.u0 < umf_ref and umf_ref > 0:
+        fixed_bed_dp = calculate_fixed_bed_dp_ergun(
+            res.u0, config.bed_height, base_dp, config.eps_mf,
+            res.rho_g, res.mu_g, config.sphericity
+        )
+        res.dp_bed_kpa = min(expected_dp_bed_kpa, fixed_bed_dp)
+        dist_factor = (res.u0 / umf_ref) ** 2
+        res.dp_distributor_kpa = expected_dist_kpa * dist_factor
+        res.dp_total_kpa = res.dp_bed_kpa + res.dp_distributor_kpa
+
+    res.dp_ratio = res.dp_bed_kpa / expected_dp_bed_kpa if expected_dp_bed_kpa > 0 else 1.0
+
+    # 10. Bubble properties & regime
+    res.bubble_diameter_m, res.bubble_velocity_m_s = calculate_bubble_properties(
+        res.u0, umf_ref, config.bed_height, config
+    )
+    res.regime = determine_fluidization_regime(res.u0, umf_ref, res.ut)
+
+    # 11. Physics state classification
+    res.physics_state, res.physics_risk_level, res.physics_reason = classify_physics_state(
+        u0=res.u0,
+        umf_eff=res.umf_effective,
+        ut=res.ut,
+        dp_bed=res.dp_bed_kpa,
+        dp_expected=expected_dp_bed_kpa,
+        temp_c=reactor_temp_c
     )
 
     return res

@@ -9,14 +9,91 @@
     "airflow_deviation",
     "pressure_deviation"
   ],
+  "class_names": [
+    "EARLY_AGGLOMERATION",
+    "NORMAL_FLUIDIZATION",
+    "SEVERE_CLUMPING"
+  ],
+  "leakage_check": {
+    "accuracy_with_label_defining_features": 0.984375,
+    "accuracy_without_label_defining_features": 0.459375,
+    "accuracy_drop_pct": 52.5,
+    "leakage_feature_importances": {
+      "bed_temperature": 0.11576341942781822,
+      "airflow": 0.027379597800473145,
+      "pressure_drop": 0.0022363239718866086,
+      "plastic_ratio": 0.025271676109902635,
+      "temperature_gradient": 0.11079363074460315,
+      "airflow_deviation": 0.02494026648399783,
+      "pressure_deviation": 0.002425706471730073,
+      "u0_over_umf_eff": 0.6314694799226209,
+      "u0_over_ut": 0.05971989906696743,
+      "dp_ratio": 0.0
+    },
+    "clean_feature_importances": {
+      "bed_temperature": 0.22334120001004487,
+      "airflow": 0.15927801698559999,
+      "pressure_drop": 0.024578430788669618,
+      "plastic_ratio": 0.16983868232538105,
+      "temperature_gradient": 0.2311902439589901,
+      "airflow_deviation": 0.15824499267480582,
+      "pressure_deviation": 0.03352843325650863
+    },
+    "confusion_matrix_clean": [
+      [
+        114,
+        52,
+        82
+      ],
+      [
+        30,
+        72,
+        34
+      ],
+      [
+        58,
+        90,
+        108
+      ]
+    ],
+    "classification_report_clean": {
+      "EARLY_AGGLOMERATION": {
+        "precision": 0.5643564356435643,
+        "recall": 0.4596774193548387,
+        "f1-score": 0.5066666666666667,
+        "support": 248.0
+      },
+      "NORMAL_FLUIDIZATION": {
+        "precision": 0.3364485981308411,
+        "recall": 0.5294117647058824,
+        "f1-score": 0.4114285714285714,
+        "support": 136.0
+      },
+      "SEVERE_CLUMPING": {
+        "precision": 0.48214285714285715,
+        "recall": 0.421875,
+        "f1-score": 0.45,
+        "support": 256.0
+      },
+      "accuracy": 0.459375,
+      "macro avg": {
+        "precision": 0.4609826303057542,
+        "recall": 0.470321394686907,
+        "f1-score": 0.456031746031746,
+        "support": 640.0
+      },
+      "weighted avg": {
+        "precision": 0.48304058877182776,
+        "recall": 0.459375,
+        "f1-score": 0.4637619047619048,
+        "support": 640.0
+      }
+    },
+    "leakage_statement": "Accuracy is near 100% with label-defining features only because the label rule uses the same inputs (U0/Umf_eff). When evaluating on unseen operating groups with plant telemetry alone, accuracy reflects true observability of hidden agglomeration dynamics."
+  },
   "results": {
     "random_forest": {
-      "val_accuracy": 0.99,
-      "test_accuracy": 0.9908409658617818
-    },
-    "gradient_boosting": {
-      "val_accuracy": 0.99,
-      "test_accuracy": 0.9908409658617818
+      "test_accuracy": 0.459375
     }
   }
 }

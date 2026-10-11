@@ -113,21 +113,33 @@ class AnomalyPredictor:
         }
     
     def _fallback_predict(self, features: dict) -> dict:
-        """Rule-based fallback when model isn't loaded."""
-        plastic = features.get("plastic_ratio", 20)
-        temp = features.get("bed_temperature", 850)
-        pressure = features.get("pressure_drop", 15.2)
-        airflow = features.get("airflow", 120)
+        """Rule-based physics fallback when model isn't loaded."""
+        plastic = float(features.get("plastic_ratio", 20.0))
+        temp = float(features.get("bed_temperature", 850.0))
+        pressure = float(features.get("pressure_drop", 15.2))
+        airflow = float(features.get("airflow", 120.0))
         
-        if plastic >= 45 and temp < 780 and pressure > 22:
+        # Check if direct physics quantities are supplied
+        if "u0_over_umf_eff" in features and "u0_over_ut" in features and "dp_ratio" in features:
+            from simulation.fluidization import classify_physics_state
+            state, risk, reason = classify_physics_state(
+                u0=features.get("u0_m_s", 0.567),
+                umf_eff=features.get("umf_effective_m_s", 0.056),
+                ut=features.get("ut_m_s", 2.8),
+                dp_bed=pressure,
+                dp_expected=8.58,
+                temp_c=temp
+            )
+            conf = 0.90
+        elif temp < 650.0 or temp > 1020.0 or (plastic >= 45.0 and temp < 780.0) or (pressure > 25.0) or (airflow < 80.0 and plastic >= 35.0):
             state = "SEVERE_CLUMPING"
             conf = 0.88
-        elif plastic >= 35 and (temp < 830 or pressure > 17):
+        elif temp < 750.0 or temp > 930.0 or plastic >= 35.0 or pressure > 18.0 or airflow < 105.0:
             state = "EARLY_AGGLOMERATION"
-            conf = 0.75
+            conf = 0.78
         else:
             state = "NORMAL_FLUIDIZATION"
-            conf = 0.82
+            conf = 0.84
         
         risk_map = {
             "NORMAL_FLUIDIZATION": "LOW",
@@ -135,11 +147,47 @@ class AnomalyPredictor:
             "SEVERE_CLUMPING": "CRITICAL",
         }
         
+        rec_map = {
+            "NORMAL_FLUIDIZATION": "System operating within normal parameters.",
+            "EARLY_AGGLOMERATION": (
+                "Early signs of bed agglomeration detected. Monitor closely. "
+                "Consider reducing plastic fraction or increasing airflow."
+            ),
+            "SEVERE_CLUMPING": (
+                "Severe bed agglomeration or defluidization detected. Reduce plastic feed ratio, "
+                "increase airflow, and raise bed temperature."
+            ),
+        }
+        
+        # Approximate posterior probabilities for UI consistency
+        probs = {
+            "NORMAL_FLUIDIZATION": 0.08,
+            "EARLY_AGGLOMERATION": 0.08,
+            "SEVERE_CLUMPING": 0.08,
+        }
+        probs[state] = round(conf, 2)
+        rem = round((1.0 - conf) / 2.0, 2)
+        for k in probs:
+            if k != state:
+                probs[k] = rem
+
+        factors = []
+        if plastic > 35:
+            factors.append(f"High plastic ratio: {plastic:.1f}%")
+        if temp < 800:
+            factors.append(f"Low bed temperature: {temp:.1f}°C")
+        if pressure > 20:
+            factors.append(f"Elevated pressure drop: {pressure:.1f} kPa")
+        if airflow < 100:
+            factors.append(f"Low airflow: {airflow:.1f} m³/h")
+
         return {
             "state": state,
             "confidence": conf,
-            "risk_level": risk_map[state],
-            "recommendation": "Rule-based prediction (model not loaded).",
+            "risk_level": risk_map.get(state, "LOW"),
+            "probabilities": probs,
+            "recommendation": rec_map.get(state, "Rule-based fallback assessment."),
+            "contributing_factors": factors,
             "model_loaded": False,
         }
     

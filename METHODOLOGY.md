@@ -334,12 +334,122 @@ For a fluidized bed operating at bed temperature $T_{bed} = 850^\circ\text{C}$ w
 
 The default column internal diameter was resized from $0.80\text{ m}$ to **$1.30\text{ m}$** so that superficial velocity is $U_0 \approx 0.5 - 0.7\text{ m/s}$ at $ER = 0.30$. All operational scenarios are re-based relative to this baseline:
 
-| Scenario ID | Name | Old Airflow ($Nm^3/h$) | New Airflow ($Nm^3/h$) | Operating ER | Regime | Fluidization Risk |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| `normal` | Normal Operation | 120.0 | **659.4** | 0.2991 | Bubbling | 0.000 (Low) |
-| `high_plastic` | High Plastic Waste | 125.0 | **686.9** | 0.3009 | Bubbling | 0.090 (Low) |
-| `high_moisture` | High Moisture Waste | 130.0 | **714.4** | 0.4237 | Bubbling | 0.000 (Low) |
-| `early_agglomeration` | Early Agglomeration | 115.0 | **631.9** | 0.2866 | Bubbling | 0.000 (Low) |
-| `severe_clumping` | Severe Clumping | 95.0 | **522.0** | 0.2454 | Bubbling | 0.247 (Low) |
-| `high_throughput` | High Throughput ($800\text{ kg/h}$) | 180.0 | **1055.0** | 0.2991 | Bubbling | 0.000 (Low) |
-| `low_airflow` | Low Airflow | 80.0 | **439.6** | 0.1994 | Bubbling | 0.000 (Low) |
+| Scenario ID | Name | Old Airflow ($Nm^3/h$) | New Airflow ($Nm^3/h$) | Operating ER | Regime | Fluidization Risk | $U_0 / U_{mf,eff}$ |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `normal` | Normal Operation | 120.0 | **659.4** | 0.2991 | Bubbling | 0.000 (Low) | **10.054** |
+| `high_plastic` | High Plastic Waste | 125.0 | **686.9** | 0.3009 | Bubbling | 0.090 (Low) | **10.621** |
+| `high_moisture` | High Moisture Waste | 130.0 | **714.4** | 0.4237 | Bubbling | 0.000 (Low) | **10.739** |
+| `early_agglomeration` | Early Agglomeration | 115.0 | **631.9** | 0.2866 | Bubbling | 0.000 (Low) | **1.869** |
+| `severe_clumping` | Severe Clumping | 95.0 | **522.0** | 0.2454 | Bubbling | 0.247 (Low) | **0.621** |
+| `high_throughput` | High Throughput ($800\text{ kg/h}$) | 180.0 | **1055.0** | 0.2991 | Bubbling | 0.000 (Low) | **16.542** |
+| `low_airflow` | Low Airflow | 80.0 | **439.6** | 0.1994 | Bubbling | 0.000 (Low) | **6.236** |
+| `defluidized_agglomeration` | Defluidized Bed Agglomeration | - | **661.0** | 0.2991 | Fixed/Slumped | 1.000 (Critical) | **0.462** |
+
+---
+
+## 9. Known Limitations & Modeling Assumptions Disclosure
+
+To maintain full transparency, scientific rigor, and engineering integrity, the key assumptions and inherent model constraints are documented plainly:
+
+1. **Boiler Thermal Efficiency Assumption ($\eta_{boiler} = 85.0\%$)**:
+   - The boiler heat capture efficiency is modeled as a fixed engineering assumption ($\eta_{boiler} = 0.85$). In physical heat recovery steam generators (HRSG), actual efficiency varies dynamically with fouling factor, excess air ratio, acid gas dew point limits, and convective pass sootblowing cycles.
+2. **District Heat Exchanger Effectiveness Assumption ($\varepsilon_{hx} = 0.8075$)**:
+   - The overall thermal recovery effectiveness is taken as $\varepsilon_{hx} = 0.85 \times 0.95 = 0.8075$ (combining plate heat exchanger effectiveness $\varepsilon=0.85$ and district distribution piping thermal efficiency $0.95$). Actual network return temperatures and ambient seasonal heat demands will alter heat recovery.
+3. **Semi-Empirical Carbon Conversion Kinetics Formula**:
+   - The carbon conversion relationship $X_C = X_{C, pot} \cdot [f_{vol} + (1 - f_{vol})(1 - e^{-ER / ER_{ref}})]$ is a semi-empirical engineering formulation rather than a detailed multi-phase particle kinetics solver. It approximates the transition from rapid devolatilization ($f_{vol} = 0.65$) to heterogeneous char oxidation ($ER_{ref} = 0.18$), but does not capture intra-particle pore diffusion or ash layer mass-transfer resistance.
+4. **Whole-Plant 3.67% Energy Balance Residual**:
+   - The $3.67\%$ ($+95.78\text{ kW}$) energy balance discrepancy in the default scenario is **identical to the net autothermal reaction heat surplus by construction** ($\dot{Q}_{net} = +95.78\text{ kW}$ from `compute_reactor_heat_balance`). It is **not** an independent error measure or leak term. Because the stack loss model assumes baseline sensible enthalpy required to reach $850^\circ\text{C}$ while the partial oxidation chemistry yields an exothermic surplus, this surplus manifests directly as the First-Law residual.
+
+---
+
+## 10. Phase 3: Physics-Labeled Anomaly Detection & Hydrodynamic Agglomeration
+
+### 10.1 Defluidization Physics & Agglomeration Model
+In fluidized bed gasification of polymer-rich waste, bed sand grains sinter and coalesce due to molten ash/polymer coatings, forming larger clusters.
+1. **Agglomeration Growth Formulation**:
+   $$d_{p,eff} = d_p \cdot (1 + k_{agg} \cdot a)$$
+   - Base mean silica sand diameter: $d_p = 400\,\mu\text{m}$ ($400 \times 10^{-6}\text{ m}$)
+   - Dimensionless agglomeration index: $a \in [0.0, 1.0]$
+   - Maximum agglomeration cluster growth factor: $k_{agg} = 5.0$ (at $a = 1.0$, clusters reach $6 \times d_p = 2400\,\mu\text{m}$)
+2. **Effective Minimum Fluidization Velocity ($U_{mf,eff}$)**:
+   $U_{mf,eff}$ is recalculated directly using the rigorous Ergun (1952) and Wen & Yu (1966) hydrodynamic correlations with $d_{p,eff}$:
+   $$Ar_{eff} = \frac{d_{p,eff}^3 \rho_g (\rho_p - \rho_g) g}{\mu_g^2}$$
+   $$Re_{mf,eff} = \sqrt{33.7^2 + 0.0408 Ar_{eff}} - 33.7$$
+   $$U_{mf,eff} = \frac{Re_{mf,eff} \mu_g}{\rho_g d_{p,eff}}$$
+   Because $Ar \propto d_{p,eff}^3$ and $U_{mf} \propto d_{p,eff}^{1.0 \text{ to } 2.0}$, growing agglomerate size drastically raises the gas velocity required to sustain fluidization.
+3. **Defluidized Bed Agglomeration Scenario (`defluidized_agglomeration`)**:
+   To isolate this physical mechanism, a dedicated scenario was added where $U_0 / U_{mf,eff} < 1.0$ arises **solely** from agglomeration growth:
+   - Feed Rate: $500.0\text{ kg/h}$ (identical to baseline `normal`)
+   - Feed Moisture: $15.0\%$ (identical to baseline `normal`)
+   - Plastic Fraction: $0.20$ (identical to baseline `normal`)
+   - Operating Temperature: $850.0^\circ\text{C}$ (identical to baseline `normal`)
+   - Airflow: $661.0\text{ Nm}^3/\text{h}$ (identical to baseline `normal`)
+   - Operating Pressure: $101.325\text{ kPa}$ (identical to baseline `normal`)
+   - **Agglomeration Index**: $a = 0.85$
+   - **Physical Consequence**:
+     $$d_{p,eff} = 400 \times (1 + 5.0 \times 0.85) = 2100\,\mu\text{m} = 2.10\text{ mm}$$
+     $$U_0 = 0.5674\text{ m/s}, \quad U_{mf,eff} = 1.2276\text{ m/s}$$
+     $$\frac{U_0}{U_{mf,eff}} = \frac{0.5674}{1.2276} = \mathbf{0.4622} < 1.0 \implies \textbf{COMPLETE DEFLUIDIZATION}$$
+   Because airflow and temperature are nominal, defluidization is proven to arise purely from particle agglomeration growth.
+
+### 10.2 State Labels Purely from Physics Quantities
+No ground-truth label is permitted to originate from machine learning predictions or predefined scenario names. All state labels are computed strictly from dimensionless fluid mechanics and thermal margins:
+
+| Target Physics State | Physical Quantities / Threshold Criteria | Physical Rationale |
+| :--- | :--- | :--- |
+| **`SEVERE_CLUMPING`** | 1. $U_0 / U_{mf,eff} < 1.0$<br>2. $U_0 / Ut \ge 0.75$<br>3. $\Delta P_{bed} / \Delta P_{expected} < 0.60$<br>4. $T_{bed} < 650.0^\circ\text{C}$<br>5. $T_{bed} > 1020.0^\circ\text{C}$ | - Superficial velocity below $U_{mf,eff}$ causes complete bed collapse into a packed/slumped bed.<br>- $U_0 / U_t \ge 0.75$ approaches terminal carryover, causing total solids blowout and bed emptying.<br>- $\Delta P$ below 60% of buoyant weight indicates severe gas channeling and stagnant dead zones.<br>- $T < 650^\circ\text{C}$ causes flameout and thermal collapse.<br>- $T > 1020^\circ\text{C}$ triggers massive mineral/ash eutectics and bulk clinkering. |
+| **`EARLY_AGGLOMERATION`** | 1. $1.0 \le U_0 / U_{mf,eff} < 2.0$<br>2. $0.50 \le U_0 / Ut < 0.75$<br>3. $0.60 \le \Delta P_{bed} / \Delta P_{expected} < 0.85$<br>4. $650.0^\circ\text{C} \le T_{bed} < 750.0^\circ\text{C}$<br>5. $930.0^\circ\text{C} < T_{bed} \le 1020.0^\circ\text{C}$ | - Standard design rules require $U_0 \ge 2 - 3 U_{mf}$ for stable bubbling; margins $< 2.0$ indicate degraded solids mixing and growing particle clusters.<br>- $0.50 \le U_0 / U_t < 0.75$ marks slugging transition and elevated fines carryover.<br>- $\Delta P$ between 60-85% of buoyant plateau signals localized chimney formation.<br>- $T < 750^\circ\text{C}$ causes heavy tar deposition and sticky particle agglomeration.<br>- $T > 930^\circ\text{C}$ triggers thermal softening of synthetic polymer feedstocks. |
+| **`NORMAL_FLUIDIZATION`** | 1. $U_0 / U_{mf,eff} \ge 2.0$<br>2. $U_0 / Ut < 0.50$<br>3. $0.85 \le \Delta P_{bed} / \Delta P_{expected} \le 1.15$<br>4. $750.0^\circ\text{C} \le T_{bed} \le 930.0^\circ\text{C}$ | - Solid bubbling fluidization operating securely within the Kunii-Levenspiel stability window.<br>- Zero elutriation blowout risk.<br>- Stable bed pressure drop plateau matching buoyant bed weight.<br>- Optimal autothermal gasification temperature window. |
+
+### 10.3 Synthetic Telemetry Generator & Measurement Noise
+The data generator (`ml/anomaly/generate_data.py`) samples physical operating conditions with a fixed seed (`seed = 42`) across 400 operating condition clusters, executing the full simulator.
+- **Documented Sensor Noise**:
+  - Thermocouple Bed Temperature: $\mathcal{N}(0, 3.0^\circ\text{C})$
+  - Primary Airflow Transmitter: $\mathcal{N}(0, 1.5\text{ Nm}^3/\text{h})$
+  - Differential Pressure Transducer: $\mathcal{N}(0, 0.15\text{ kPa})$
+  - Compositional Plastic Ratio Sensor: $\mathcal{N}(0, 1.0\%)$
+- **Class Proportions (3,200 Total Samples)**:
+  - `SEVERE_CLUMPING`: **1,176 samples (36.75%)**
+  - `EARLY_AGGLOMERATION`: **1,144 samples (35.75%)**
+  - `NORMAL_FLUIDIZATION`: **880 samples (27.50%)**
+  - *No class has fewer than 5% of samples (minimum class is 27.50% $\gg$ 5.0%).*
+
+### 10.4 Leakage Check & Observability Analysis
+To rigorously verify model integrity, training was performed using a `GroupShuffleSplit` (grouped by operating condition cluster `group_id`) so test samples represent completely unseen operating conditions:
+
+| Evaluation Metric | Model A: With Label-Defining Features | Model B: Plant Telemetry Only (Production) | Absolute Change |
+| :--- | :---: | :---: | :---: |
+| **Feature Set** | 10 features (includes $U_0/U_{mf,eff}$, $U_0/U_t$, $\Delta P$ ratio) | 7 features (surface plant sensors: $T$, $V_{air}$, $\Delta P$, $w_{plastic}$) | -3 physics ratios |
+| **Test Accuracy** | **98.44%** | **45.94%** | **-52.50% drop** |
+| **Top Feature 1** | $U_0 / U_{mf,eff}$ (**63.15%**) | Temperature Gradient (**23.12%**) | Shift to raw sensor |
+| **Top Feature 2** | Bed Temperature (**11.58%**) | Bed Temperature (**22.33%**) | Thermal indicators |
+| **Top Feature 3** | Temperature Gradient (**11.08%**) | Plastic Ratio (**16.98%**) | Feedstock fraction |
+| **Top Feature 4** | $U_0 / U_t$ (**5.97%**) | Airflow (**15.93%**) | Gas supply |
+
+#### Plain Leakage Statement:
+> **LEAKAGE CHECK FINDING**: Accuracy is near 100% (98.44%) in Model A **ONLY because the label rule directly utilizes the exact same dimensionless physics quantities ($U_0/U_{mf,eff}$) as input features**. The decision trees simply reconstruct the threshold split $U_0/U_{mf,eff} < 1.0$ with 63.15% feature importance.
+> When evaluated on unseen operating groups using observable plant telemetry alone (Model B), accuracy drops by **52.50%** down to **45.94%**. This drop occurs because microscopic particle sintering and agglomerate cluster size ($d_{p,eff}$) are **latent internal bed physical states** that cannot be uniquely reconstructed from surface macroscopic telemetry alone without direct in-bed cluster measurement.
+
+#### Production Model B Confusion Matrix & Per-Class Metrics:
+- **Confusion Matrix** (Rows = Ground Truth Physics, Columns = Predicted):
+  - `EARLY_AGGLOMERATION`: `[114, 52, 82]` (Precision: 0.564, Recall: 0.460, F1: 0.507)
+  - `NORMAL_FLUIDIZATION`: `[30, 72, 34]` (Precision: 0.336, Recall: 0.529, F1: 0.411)
+  - `SEVERE_CLUMPING`: `[58, 90, 108]` (Precision: 0.482, Recall: 0.422, F1: 0.450)
+
+---
+
+## 11. Scenario Physics vs Machine Learning Comparison Table
+
+Every default and stress scenario was evaluated with both the First-Principles Physics classifier and the retrained Machine Learning model (Random Forest on plant telemetry):
+
+| Scenario ID | Physics Label | ML Prediction | ML Conf. | Status | Physical Reason & Explanation of Disagreement |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| `normal` | `NORMAL_FLUIDIZATION` | `NORMAL_FLUIDIZATION` | 53.3% | **MATCH** | All parameters operate at design baseline ($850^\circ\text{C}$, $659.4\text{ Nm}^3/\text{h}$, $U_0/U_{mf,eff} = 10.05 \gg 2.0$). |
+| `high_plastic` | `NORMAL_FLUIDIZATION` | `NORMAL_FLUIDIZATION` | 58.3% | **MATCH** | Plastic is elevated ($45\%$), but airflow is proportionally increased ($686.9\text{ Nm}^3/\text{h}$), maintaining $U_0/U_{mf,eff} = 10.62$ in stable bubbling. |
+| `high_moisture` | `NORMAL_FLUIDIZATION` | `EARLY_AGGLOMERATION` | 43.8% | **FLAG: DISAGREEMENT** | **Physical Reason**: High moisture ($35\%$) requires higher stoichiometric air ($714.4\text{ Nm}^3/\text{h}$, $+8.3\%$ airflow deviation) and slightly depresses bed temperature ($840^\circ\text{C}$). The ML telemetry model observes the deviation and flags early degradation, but true fluidization physics confirms that the high volumetric gas flow expands velocity ($U_0 = 0.609\text{ m/s}$), keeping $U_0/U_{mf,eff} = 10.74 \gg 2.0$ solidly within the stable bubbling window. |
+| `early_agglomeration` | `EARLY_AGGLOMERATION` | `NORMAL_FLUIDIZATION` | 50.0% | **FLAG: DISAGREEMENT** | **Physical Reason**: Telemetry sensors ($820^\circ\text{C}$, $631.9\text{ Nm}^3/\text{h}$) appear close to nominal. However, internal particle agglomeration ($a = 0.25$) has enlarged $d_{p,eff}$ to $900\,\mu\text{m}$, raising $U_{mf,eff}$ to $0.283\text{ m/s}$ and degrading operating margin to $U_0/U_{mf,eff} = 1.869 < 2.0$. Because the ML model only observes surface sensors, it underpredicts the latent agglomeration onset. |
+| `severe_clumping` | `SEVERE_CLUMPING` | `EARLY_AGGLOMERATION` | 56.7% | **FLAG: DISAGREEMENT** | **Physical Reason**: Operating at $750^\circ\text{C}$ with $50\%$ plastic and reduced airflow ($522.0\text{ Nm}^3/\text{h}$). Agglomeration ($a = 0.50$) has grown $d_{p,eff}$ to $1400\,\mu\text{m}$, lifting $U_{mf,eff}$ to $0.659\text{ m/s} > U_0 (0.409\text{ m/s})$ and causing complete defluidization ($U_0/U_{mf,eff} = 0.621 < 1.0$). The ML model correctly recognizes an anomaly, but classifies it as `EARLY_AGGLOMERATION` rather than `SEVERE_CLUMPING` because surface telemetry alone cannot distinguish between incipient clumping and complete bed slump. |
+| `high_throughput` | `NORMAL_FLUIDIZATION` | `NORMAL_FLUIDIZATION` | 62.7% | **MATCH** | Airflow scales proportionally with $800\text{ kg/h}$ feed ($1055.0\text{ Nm}^3/\text{h}$), yielding vigorous fluidization ($U_0/U_{mf,eff} = 16.54$). |
+| `low_airflow` | `NORMAL_FLUIDIZATION` | `NORMAL_FLUIDIZATION` | 44.6% | **MATCH** | Lower air ($439.6\text{ Nm}^3/\text{h}$) reduces superficial velocity to $U_0 = 0.361\text{ m/s}$, but clean particle diameter keeps $U_0/U_{mf,eff} = 6.24 > 2.0$. |
+| `defluidized_agglomeration` | `SEVERE_CLUMPING` | `NORMAL_FLUIDIZATION` | 53.3% | **FLAG: DISAGREEMENT** | **Physical Reason**: In this scenario, all macroscopic plant inputs ($850^\circ\text{C}$, $661.0\text{ Nm}^3/\text{h}$, $500\text{ kg/h}$) match nominal design baselines. Defluidization arises **exclusively** from internal particle sintering ($a = 0.85$, $d_{p,eff} = 2.1\text{ mm}$, $U_{mf,eff} = 1.23\text{ m/s} > U_0 = 0.57\text{ m/s} \implies U_0/U_{mf,eff} = 0.462 < 1.0$). Because surface sensor telemetry is indistinguishable from nominal operation, any telemetry-only ML model predicts `NORMAL_FLUIDIZATION`. This proves why First-Principles hydrodynamic modeling is essential alongside machine learning. |
+

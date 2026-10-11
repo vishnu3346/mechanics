@@ -93,6 +93,9 @@ class ScenarioParams:
     sulfur: float = 0.002
     chlorine: float = 0.008
     ash: float = 0.05
+    # Hydrodynamic particle & agglomeration parameters
+    agglomeration_index: float = 0.0  # Particle agglomeration index [0.0 = clean bed, 1.0 = fully agglomerated]
+    d_p: float = 400e-6               # Base particle diameter (m)
 
 
 # Predefined scenarios (re-based relative to ER=0.30 baseline of 661.0 Nm³/h)
@@ -101,6 +104,7 @@ SCENARIOS = {
         name="Normal Operation",
         waste_feed_kg_h=500, moisture_pct=15, plastic_ratio=0.20,
         organic_ratio=0.50, airflow_m3_h=DEFAULT_AIRFLOW_NM3_H, reactor_temp_c=850,
+        agglomeration_index=0.0,
     ),
     "high_plastic": ScenarioParams(
         name="High Plastic Waste",
@@ -108,6 +112,7 @@ SCENARIOS = {
         organic_ratio=0.30,
         airflow_m3_h=round(DEFAULT_AIRFLOW_NM3_H * 125.0 / 120.0, 1),  # 688.5 Nm³/h
         reactor_temp_c=860,
+        agglomeration_index=0.0,
     ),
     "high_moisture": ScenarioParams(
         name="High Moisture Waste",
@@ -115,6 +120,7 @@ SCENARIOS = {
         organic_ratio=0.45,
         airflow_m3_h=round(DEFAULT_AIRFLOW_NM3_H * 130.0 / 120.0, 1),  # 716.1 Nm³/h
         reactor_temp_c=840,
+        agglomeration_index=0.0,
     ),
     "early_agglomeration": ScenarioParams(
         name="Early Agglomeration",
@@ -122,6 +128,7 @@ SCENARIOS = {
         organic_ratio=0.35,
         airflow_m3_h=round(DEFAULT_AIRFLOW_NM3_H * 115.0 / 120.0, 1),  # 633.5 Nm³/h
         reactor_temp_c=820,
+        agglomeration_index=0.25,
     ),
     "severe_clumping": ScenarioParams(
         name="Severe Clumping",
@@ -129,6 +136,7 @@ SCENARIOS = {
         organic_ratio=0.25,
         airflow_m3_h=round(DEFAULT_AIRFLOW_NM3_H * 95.0 / 120.0, 1),   # 523.3 Nm³/h
         reactor_temp_c=750,
+        agglomeration_index=0.50,
     ),
     "high_throughput": ScenarioParams(
         name="High Throughput",
@@ -137,6 +145,7 @@ SCENARIOS = {
         airflow_m3_h=calculate_stoichiometric_airflow(800.0, 15.0, target_er=0.30),  # 1057.6 Nm³/h
         reactor_temp_c=870,
         water_flow_kg_h=350,
+        agglomeration_index=0.0,
     ),
     "low_airflow": ScenarioParams(
         name="Low Airflow",
@@ -144,6 +153,17 @@ SCENARIOS = {
         organic_ratio=0.45,
         airflow_m3_h=round(DEFAULT_AIRFLOW_NM3_H * 80.0 / 120.0, 1),   # 440.7 Nm³/h
         reactor_temp_c=800,
+        agglomeration_index=0.0,
+    ),
+    "defluidized_agglomeration": ScenarioParams(
+        name="Defluidized Bed Agglomeration",
+        waste_feed_kg_h=500.0,
+        moisture_pct=15.0,
+        plastic_ratio=0.20,
+        organic_ratio=0.50,
+        airflow_m3_h=DEFAULT_AIRFLOW_NM3_H,  # 661.0 Nm³/h (standard nominal baseline airflow)
+        reactor_temp_c=850.0,                # 850.0 °C (standard nominal baseline temperature)
+        agglomeration_index=0.85,            # Defluidization arises SOLELY from agglomeration growth (d_eff=2.1 mm, Umf_eff=1.23 m/s > U0=0.57 m/s)
     ),
 }
 
@@ -330,6 +350,8 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         pressure_kpa=params.pressure_kpa,
         plastic_ratio=params.plastic_ratio,
         config=fluid_config,
+        agglomeration_index=getattr(params, "agglomeration_index", 0.0),
+        d_p=getattr(params, "d_p", 400e-6),
     )
     # Total pressure drop (kPa) derived from bed buoyant weight and distributor drop
     pressure_drop = fluid_result.dp_total_kpa
@@ -347,12 +369,22 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
     anomaly_features["airflow_deviation"] = (base_af - params.airflow_m3_h) / base_af if base_af > 0 else 0.0
     anomaly_features["pressure_deviation"] = (pressure_drop - 8.58) / 8.58
     
+    # Baseline recommendation aligned with physics state
+    if fluid_result.physics_state == "SEVERE_CLUMPING":
+        rec = "Severe bed agglomeration or defluidization detected. Reduce plastic feed ratio, increase airflow, and raise bed temperature."
+    elif fluid_result.physics_state == "EARLY_AGGLOMERATION":
+        rec = "Early signs of bed agglomeration detected. Monitor closely. Consider reducing plastic fraction or increasing airflow."
+    else:
+        rec = "System operating within normal parameters."
+
     anomaly_result = {
-        "state": "NORMAL_FLUIDIZATION",
-        "confidence": 0.85,
-        "risk_level": "LOW",
+        "state": fluid_result.physics_state,
+        "confidence": 0.88,
+        "risk_level": fluid_result.physics_risk_level,
         "features": anomaly_features,
-        "recommendation": "System operating within normal parameters.",
+        "recommendation": rec,
+        "physics_label": fluid_result.physics_state,
+        "physics_reason": fluid_result.physics_reason,
         "model_loaded": False,
     }
     
@@ -365,28 +397,11 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
             model_input_features["pressure_drop"] = 15.2 * (pressure_drop / 8.58) if pressure_drop > 0 else pressure_drop
             prediction = anomaly_predictor(model_input_features)
             anomaly_result.update(prediction)
+            anomaly_result["physics_label"] = fluid_result.physics_state
+            anomaly_result["physics_reason"] = fluid_result.physics_reason
             anomaly_result["model_loaded"] = True
         except Exception as e:
             anomaly_result["model_error"] = str(e)
-    else:
-        # Rule-based fallback (informed by hydrodynamic defluidization risk and plastic/temp criteria)
-        plastic_pct = anomaly_features["plastic_ratio"]
-        if fluid_result.defluidization_risk >= 0.85 or (plastic_pct >= 45 and params.reactor_temp_c < 780):
-            anomaly_result["state"] = "SEVERE_CLUMPING"
-            anomaly_result["confidence"] = 0.92
-            anomaly_result["risk_level"] = "CRITICAL"
-            anomaly_result["recommendation"] = (
-                "Severe bed agglomeration detected. Reduce plastic feed ratio, "
-                "increase airflow, and raise bed temperature."
-            )
-        elif fluid_result.defluidization_risk >= 0.50 or (plastic_pct >= 35 and params.reactor_temp_c < 830):
-            anomaly_result["state"] = "EARLY_AGGLOMERATION"
-            anomaly_result["confidence"] = 0.78
-            anomaly_result["risk_level"] = "MEDIUM"
-            anomaly_result["recommendation"] = (
-                "Early signs of bed agglomeration. Monitor closely. "
-                "Consider reducing plastic fraction or increasing airflow."
-            )
     
     # 5. Feed Pump & Steam generation (closed Rankine loop with IAPWS-IF97)
     # 5a. Initial feed pump calculation at design flow (50 °C condensate return -> 10 bar)
@@ -517,20 +532,28 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
             "umf_diff_pct": round(fluid_result.umf_diff_pct, 2),
             "ut_m_s": round(fluid_result.ut, 4),
             "u0_over_umf": round(fluid_result.u0_over_umf, 3),
+            "u0_over_umf_eff": round(fluid_result.u0_over_umf_eff, 4),
+            "u0_over_ut": round(fluid_result.u0_over_ut, 4),
             "geldart_group": fluid_result.geldart_group,
             "regime": fluid_result.regime,
+            "agglomeration_index": round(fluid_result.agglomeration_index, 4),
+            "d_eff_m": round(fluid_result.d_eff, 6),
             "defluidization_risk": round(fluid_result.defluidization_risk, 3),
             "umf_effective_m_s": round(fluid_result.umf_effective, 4),
             "dp_bed_kpa": round(fluid_result.dp_bed_kpa, 3),
             "dp_distributor_kpa": round(fluid_result.dp_distributor_kpa, 3),
             "pressure_drop": round(fluid_result.dp_total_kpa, 3),
             "pressure_drop_kpa": round(fluid_result.dp_total_kpa, 3),
+            "dp_ratio": round(fluid_result.dp_ratio, 4),
             "gas_density_kg_m3": round(fluid_result.rho_g, 4),
             "gas_viscosity_pa_s": round(fluid_result.mu_g, 6),
             "archimedes": round(fluid_result.archimedes, 2),
             "defluidization_margin": round(fluid_result.defluidization_margin, 3),
             "bubble_diameter_m": round(fluid_result.bubble_diameter_m, 4),
             "bubble_velocity_m_s": round(fluid_result.bubble_velocity_m_s, 4),
+            "physics_state": fluid_result.physics_state,
+            "physics_risk_level": fluid_result.physics_risk_level,
+            "physics_reason": fluid_result.physics_reason,
         },
         # Top-level hydrodynamic and diagnostic keys for direct access
         "equivalence_ratio": round(gasification_result.equivalence_ratio, 4),
@@ -546,13 +569,18 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         "umf_ergun_m_s": round(fluid_result.umf_ergun, 4),
         "ut_m_s": round(fluid_result.ut, 4),
         "u0_over_umf": round(fluid_result.u0_over_umf, 3),
+        "u0_over_umf_eff": round(fluid_result.u0_over_umf_eff, 4),
+        "u0_over_ut": round(fluid_result.u0_over_ut, 4),
         "geldart_group": fluid_result.geldart_group,
         "regime": fluid_result.regime,
+        "agglomeration_index": round(fluid_result.agglomeration_index, 4),
         "defluidization_risk": round(fluid_result.defluidization_risk, 3),
         "umf_effective_m_s": round(fluid_result.umf_effective, 4),
         "dp_bed_kpa": round(fluid_result.dp_bed_kpa, 3),
         "dp_distributor_kpa": round(fluid_result.dp_distributor_kpa, 3),
         "pressure_drop": round(fluid_result.dp_total_kpa, 3),
+        "dp_ratio": round(fluid_result.dp_ratio, 4),
+        "physics_state": fluid_result.physics_state,
         "anomaly": anomaly_result,
         "steam_cycle": {
             "steam_flow_kg_h": round(steam_result.steam_mass_flow_kg_h, 2),
