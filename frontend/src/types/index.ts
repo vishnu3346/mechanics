@@ -7,6 +7,7 @@ export interface SimParams {
   reactor_temp_c: number;
   pressure_kpa: number;
   water_flow_kg_h: number;
+  agglomeration_index?: number;
 }
 
 export interface FeedstockResult {

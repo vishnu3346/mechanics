@@ -1,3 +1,4 @@
+import { Suspense, lazy } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import {
   Activity,
@@ -16,12 +17,13 @@ import {
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import OverviewPage from './pages/OverviewPage'
 import VisionPage from './pages/VisionPage'
-import SimulationPage from './pages/SimulationPage'
 import AnomalyPage from './pages/AnomalyPage'
 import EnergyPage from './pages/EnergyPage'
 import ScenariosPage from './pages/ScenariosPage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
+
+const SimulationPage = lazy(() => import('./pages/SimulationPage'))
 
 const NAV_ITEMS = [
   { path: '/overview', label: 'Overview', icon: Activity, tag: 'Live' },
@@ -160,7 +162,21 @@ function AppLayout() {
           <Route path="/" element={<Navigate to="/overview" />} />
           <Route path="/overview" element={<OverviewPage />} />
           <Route path="/vision" element={<VisionPage />} />
-          <Route path="/simulation" element={<SimulationPage />} />
+          <Route
+            path="/simulation"
+            element={
+              <Suspense
+                fallback={
+                  <div className="h-full flex items-center justify-center bg-slate-950 text-cyan-400 font-mono text-sm gap-3 p-8">
+                    <span className="w-3 h-3 rounded-full bg-cyan-400 animate-ping" />
+                    <span>Loading 3D Digital Twin Viewport...</span>
+                  </div>
+                }
+              >
+                <SimulationPage />
+              </Suspense>
+            }
+          />
           <Route path="/anomaly" element={<AnomalyPage />} />
           <Route path="/energy" element={<EnergyPage />} />
           <Route path="/scenarios" element={<ScenariosPage />} />

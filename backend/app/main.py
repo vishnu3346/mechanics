@@ -34,7 +34,8 @@ if PROJECT_ROOT_STR not in sys.path:
     sys.path.insert(0, PROJECT_ROOT_STR)
 
 from simulation.engine import (
-    run_simulation, ScenarioParams, SCENARIOS, list_scenarios, get_scenario
+    run_simulation, ScenarioParams, SCENARIOS, list_scenarios, get_scenario,
+    calculate_stoichiometric_airflow
 )
 from simulation.fluidization import generate_dp_curve, FluidizationConfig, calculate_fluidization
 from ml.anomaly.predict import AnomalyPredictor
@@ -285,6 +286,7 @@ class SimulationRequest(BaseModel):
     water_flow_kg_h: Optional[float] = None
     boiler_efficiency: Optional[float] = None
     turbine_efficiency: Optional[float] = None
+    agglomeration_index: Optional[float] = None
 
 
 class AnomalyRequest(BaseModel):
@@ -403,6 +405,8 @@ async def run_sim(request: SimulationRequest):
         params.boiler_efficiency = request.boiler_efficiency
     if request.turbine_efficiency is not None:
         params.turbine_efficiency = request.turbine_efficiency
+    if request.agglomeration_index is not None:
+        params.agglomeration_index = max(0.0, min(1.0, request.agglomeration_index))
 
     # Ensure ratios sum properly
     if params.plastic_ratio + params.organic_ratio > 0.95:
@@ -794,9 +798,12 @@ async def websocket_simulation(ws: WebSocket):
                 # Apply overrides
                 for key in ["waste_feed_kg_h", "moisture_pct", "plastic_ratio", "organic_ratio",
                            "airflow_m3_h", "reactor_temp_c", "pressure_kpa", "water_flow_kg_h",
-                           "boiler_efficiency", "turbine_efficiency"]:
+                           "boiler_efficiency", "turbine_efficiency", "agglomeration_index"]:
                     if key in data and data[key] is not None:
-                        setattr(sim_manager.params, key, data[key])
+                        val = data[key]
+                        if key == "agglomeration_index":
+                            val = max(0.0, min(1.0, float(val)))
+                        setattr(sim_manager.params, key, val)
 
                 sim_manager.running = True
                 sim_manager.start_background_loop()
@@ -823,16 +830,53 @@ async def websocket_simulation(ws: WebSocket):
             elif action == "update_params":
                 for key in ["waste_feed_kg_h", "moisture_pct", "plastic_ratio", "organic_ratio",
                            "airflow_m3_h", "reactor_temp_c", "pressure_kpa", "water_flow_kg_h",
-                           "boiler_efficiency", "turbine_efficiency"]:
+                           "boiler_efficiency", "turbine_efficiency", "agglomeration_index"]:
                     if key in data and data[key] is not None:
-                        setattr(sim_manager.params, key, data[key])
+                        val = data[key]
+                        if key == "agglomeration_index":
+                            val = max(0.0, min(1.0, float(val)))
+                        setattr(sim_manager.params, key, val)
+
+                # If simulation is paused, generate immediate broadcast of updated physics
+                if not sim_manager.running:
+                    p = copy.deepcopy(sim_manager.params)
+                    predictor = get_anomaly_predictor()
+                    predictor_fn = predictor.predict if (predictor and predictor.loaded) else None
+                    result = run_simulation(p, anomaly_predictor=predictor_fn)
+                    result["tick"] = sim_manager.tick
+                    result["sim_time_s"] = sim_manager.tick * 5
+                    result["speed"] = sim_manager.speed
+                    result["running"] = False
+                    result["scenario_id"] = sim_manager.scenario_id
+                    result["scenario_name"] = sim_manager.params.name
+                    sim_manager.last_result = result
+                    await sim_manager.broadcast(result)
 
             elif action == "correct":
-                # Demo correction logic
+                # Real physical mitigation: reset agglomerated bed to clean sand,
+                # restore ER=0.30 target airflow for current feed, and normalize feedstock & bed temperature
                 p = sim_manager.params
+                p.agglomeration_index = 0.0
                 p.plastic_ratio = 0.20
-                p.airflow_m3_h = 130
-                p.reactor_temp_c = 860
+                p.reactor_temp_c = 850.0
+                p.airflow_m3_h = calculate_stoichiometric_airflow(
+                    waste_feed_kg_h=p.waste_feed_kg_h,
+                    moisture_pct=p.moisture_pct,
+                    target_er=0.30,
+                )
+                if not sim_manager.running:
+                    p_copy = copy.deepcopy(sim_manager.params)
+                    predictor = get_anomaly_predictor()
+                    predictor_fn = predictor.predict if (predictor and predictor.loaded) else None
+                    result = run_simulation(p_copy, anomaly_predictor=predictor_fn)
+                    result["tick"] = sim_manager.tick
+                    result["sim_time_s"] = sim_manager.tick * 5
+                    result["speed"] = sim_manager.speed
+                    result["running"] = False
+                    result["scenario_id"] = sim_manager.scenario_id
+                    result["scenario_name"] = sim_manager.params.name
+                    sim_manager.last_result = result
+                    await sim_manager.broadcast(result)
 
     except WebSocketDisconnect:
         await sim_manager.disconnect(ws)
