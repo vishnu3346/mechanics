@@ -1,0 +1,93 @@
+{
+    "accuracy": 0.987189148455162,
+    "precision": 0.9877846660062185,
+    "recall": 0.987189148455162,
+    "f1_score": 0.9869034621582912,
+    "classification_report": {
+        "(BT) Body Tissue or Organ": {
+            "precision": 1.0,
+            "recall": 0.8557692307692307,
+            "f1-score": 0.9222797927461139,
+            "support": 104.0
+        },
+        "(GE) Glass equipment-packaging 551": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 111.0
+        },
+        "(ME) Metal equipment -packaging": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 100.0
+        },
+        "(OW) Organic wastes": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 117.0
+        },
+        "(PE) Plastic equipment-packaging": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 112.0
+        },
+        "(PP) Paper equipment-packaging": {
+            "precision": 0.9279279279279279,
+            "recall": 1.0,
+            "f1-score": 0.9626168224299065,
+            "support": 103.0
+        },
+        "(SN) Syringe needles": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 119.0
+        },
+        "Gauze": {
+            "precision": 0.9826086956521739,
+            "recall": 0.9826086956521739,
+            "f1-score": 0.9826086956521739,
+            "support": 115.0
+        },
+        "Gloves": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 109.0
+        },
+        "Mask": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 110.0
+        },
+        "Syringe": {
+            "precision": 0.9743589743589743,
+            "recall": 1.0,
+            "f1-score": 0.987012987012987,
+            "support": 114.0
+        },
+        "Tweezers": {
+            "precision": 0.9658119658119658,
+            "recall": 1.0,
+            "f1-score": 0.9826086956521739,
+            "support": 113.0
+        },
+        "accuracy": 0.987189148455162,
+        "macro avg": {
+            "precision": 0.9875589636459202,
+            "recall": 0.9865314938684504,
+            "f1-score": 0.9864272494577796,
+            "support": 1327.0
+        },
+        "weighted avg": {
+            "precision": 0.9877846660062185,
+            "recall": 0.987189148455162,
+            "f1-score": 0.9869034621582912,
+            "support": 1327.0
+        }
+    }
+}

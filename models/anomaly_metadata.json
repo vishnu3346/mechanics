@@ -1,0 +1,22 @@
+{
+  "best_model": "random_forest",
+  "feature_columns": [
+    "bed_temperature",
+    "airflow",
+    "pressure_drop",
+    "plastic_ratio",
+    "temperature_gradient",
+    "airflow_deviation",
+    "pressure_deviation"
+  ],
+  "results": {
+    "random_forest": {
+      "val_accuracy": 0.99,
+      "test_accuracy": 0.9908409658617818
+    },
+    "gradient_boosting": {
+      "val_accuracy": 0.99,
+      "test_accuracy": 0.9908409658617818
+    }
+  }
+}

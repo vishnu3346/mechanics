@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env
+runs/
+*.pth
+*.pt
+*.db
+dist/
+medical waste.v2i.yolov8/
+archive (2)/
