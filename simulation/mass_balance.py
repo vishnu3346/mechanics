@@ -36,21 +36,25 @@ def calculate_mass_balance(
     gas_output_kg_h: float,
     solid_output_kg_h: float,
     moisture_pct: float = 15.0,
-    air_density: float = 1.225,
+    air_density: float = None,
+    air_mass_kg_h: float = None,
 ) -> MassBalanceResult:
     """
-    Calculate mass balance around the gasification system.
+    Calculate mass balance around the gasification reactor control volume.
     
     Inputs:
       - waste_feed_kg_h: Total waste feed rate (kg/h)
-      - airflow_m3_h: Air volumetric flow rate (m³/h)  
+      - airflow_m3_h: Air volumetric flow rate at normal conditions (Nm³/h)  
       - gas_output_kg_h: Product gas mass flow (kg/h)
       - solid_output_kg_h: Char + ash output (kg/h)
       - moisture_pct: Waste moisture content (%)
-      - air_density: Air density at inlet conditions (kg/m³)
+      - air_density: Air density at normal conditions (kg/Nm³); default 1.2923 kg/Nm³
+      - air_mass_kg_h: Air mass flow rate (kg/h) if precomputed
     
     Mass balance:
-      waste_in + air_in = gas_out + solid_out + water_evap + unaccounted
+      Mass_in (waste + air) = Mass_out (gas + char/ash)
+      At gasifier operating temperatures (>700 °C), all feedstock moisture
+      leaves as steam vapor in the product gas (gas_output_kg_h).
     """
     result = MassBalanceResult()
     
@@ -61,15 +65,20 @@ def calculate_mass_balance(
     
     # Inputs
     result.input_waste_kg_h = waste_feed_kg_h
-    result.input_air_kg_h = airflow_m3_h * air_density
+    if air_mass_kg_h is not None:
+        result.input_air_kg_h = air_mass_kg_h
+    else:
+        # Normal air density at 0 °C, 101.325 kPa: rho = P / (R * T) = 1.2923 kg/Nm³
+        rho_normal = air_density if air_density is not None else 1.2923
+        result.input_air_kg_h = airflow_m3_h * rho_normal
+        
     result.total_input_kg_h = result.input_waste_kg_h + result.input_air_kg_h
     
     # Outputs
     result.gas_output_kg_h = gas_output_kg_h
     result.solid_output_kg_h = solid_output_kg_h
-    # Water vapor in product gas is already counted in gas_output
-    # Additional water from moisture that condenses or exits
-    result.water_output_kg_h = waste_feed_kg_h * moisture_pct / 100.0 * 0.3  # ~30% exits as liquid
+    # Moisture exits as water vapor in product gas (already included in gas_output_kg_h)
+    result.water_output_kg_h = 0.0
     
     result.total_output_kg_h = (
         result.gas_output_kg_h + 
@@ -83,10 +92,10 @@ def calculate_mass_balance(
             result.total_input_kg_h - result.total_output_kg_h
         ) / result.total_input_kg_h * 100.0
     
-    # Status determination
-    if result.balance_error_pct < 5.0:
+    # Status determination (stricter closure tolerance)
+    if result.balance_error_pct < 2.0:
         result.status = "PASS"
-    elif result.balance_error_pct < 10.0:
+    elif result.balance_error_pct < 5.0:
         result.status = "WARNING"
     else:
         result.status = "FAIL"

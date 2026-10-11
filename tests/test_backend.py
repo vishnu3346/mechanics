@@ -267,7 +267,11 @@ def test_history_record_power_and_efficiency_fields():
     assert stored["overall"]["net_power_kw"] == sim_data["overall"]["net_power_kw"]
     assert stored["overall"]["electrical_output_kw"] == sim_data["overall"]["electrical_output_kw"]
     assert stored["overall"]["overall_efficiency_pct"] == sim_data["overall"]["overall_efficiency_pct"]
-    assert stored["overall"]["net_power_kw"] == stored["overall"]["electrical_output_kw"]
+    # Net power equals gross electrical output minus auxiliary feed pump electrical consumption
+    feed_pump_kw = stored["overall"].get("feed_pump_electrical_kw", 0.0)
+    assert stored["overall"]["net_power_kw"] == pytest.approx(
+        stored["overall"]["electrical_output_kw"] - feed_pump_kw, abs=1e-2
+    )
 
 
 def test_shared_websocket_state():
@@ -371,8 +375,8 @@ def test_fluidization_curve_endpoint():
     assert data["umf"]["wen_yu_m_s"] > 0
     assert data["ut_m_s"] > data["umf"]["wen_yu_m_s"]
 
-    # Test with parameter overrides
-    res_override = client.get("/api/fluidization/curve?airflow_m3_h=180&reactor_temp_c=870")
+    # Test with parameter overrides (higher airflow than default ~661 Nm³/h)
+    res_override = client.get("/api/fluidization/curve?airflow_m3_h=800&reactor_temp_c=870")
     assert res_override.status_code == 200
     data_override = res_override.json()
     assert data_override["operating_point"]["u0_m_s"] > data["operating_point"]["u0_m_s"]

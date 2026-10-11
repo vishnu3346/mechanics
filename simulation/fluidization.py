@@ -36,7 +36,7 @@ class FluidizationConfig:
     eps_mf: float = 0.45         # ASSUMPTION: Bed voidage at minimum fluidization eps_mf = 0.45 (Wen-Yu/Ergun consistent)
 
     # Reactor geometry
-    reactor_diameter: float = 0.80  # ASSUMPTION: Circular column internal diameter = 0.80 m
+    reactor_diameter: float = 1.30  # ASSUMPTION: Circular column internal diameter = 1.30 m (sized for U0 ~ 0.5-0.7 m/s at ER = 0.30)
     bed_height: float = 0.50        # ASSUMPTION: Static/slumped bed height H_mf = 0.50 m
     distributor_dp_ratio: float = 0.20  # ASSUMPTION: Distributor pressure drop = 20% of bed pressure drop
 

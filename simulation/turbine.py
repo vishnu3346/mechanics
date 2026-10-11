@@ -28,6 +28,12 @@ Assumptions:
 from dataclasses import dataclass, field
 from simulation.steam_cycle import calculate_steam_enthalpy, saturation_temperature, CP_STEAM
 
+try:
+    from iapws import IAPWS97
+    IAPWS_AVAILABLE = True
+except ImportError:
+    IAPWS_AVAILABLE = False
+
 
 @dataclass
 class TurbineConfig:
@@ -50,6 +56,9 @@ class TurbineResult:
     exhaust_enthalpy_kj_kg: float = 0.0
     steam_rate_kg_kwh: float = 0.0  # specific steam consumption
     isentropic_efficiency: float = 0.0
+    exhaust_vapor_quality: float = 1.0
+    inlet_entropy_kj_kg_k: float = 0.0
+    steam_engine: str = "IAPWS-IF97"  # "IAPWS-IF97" or "SIMPLIFIED_FALLBACK"
     valid: bool = True
     errors: list = field(default_factory=list)
 
@@ -90,47 +99,67 @@ def calculate_turbine(
     
     result.inlet_enthalpy_kj_kg = inlet_enthalpy_kj_kg
     
-    # Isentropic outlet enthalpy estimation
-    # At exhaust pressure, estimate the enthalpy after isentropic expansion
     t_sat_out = saturation_temperature(config.outlet_pressure_bar)
-    
-    # Simplified: isentropic expansion to just above saturation at outlet pressure
-    # The actual enthalpy depends on entropy, but we use a simplified approach
-    h_out_isentropic = calculate_steam_enthalpy(
-        t_sat_out + 5, config.outlet_pressure_bar
-    )
-    
+    engine_used = "SIMPLIFIED_FALLBACK"
+    h_out_isentropic = calculate_steam_enthalpy(t_sat_out + 5, config.outlet_pressure_bar)
+    s_in = 0.0
+    x_exhaust = 1.0
+    t_exhaust_c = t_sat_out + 10.0
+
+    if IAPWS_AVAILABLE:
+        try:
+            p_in_mpa = max(0.001, inlet_pressure_bar * 0.1)
+            p_out_mpa = max(0.001, config.outlet_pressure_bar * 0.1)
+            
+            # Inlet entropy from temperature and pressure
+            st_in = IAPWS97(T=inlet_temp_c + 273.15, P=p_in_mpa)
+            s_in = st_in.s
+            
+            # Isentropic expansion to condenser pressure (s_out = s_in)
+            st_out_s = IAPWS97(P=p_out_mpa, s=s_in)
+            h_out_isentropic = st_out_s.h
+            
+            delta_h_isen = inlet_enthalpy_kj_kg - h_out_isentropic
+            if delta_h_isen > 0:
+                delta_h_act = delta_h_isen * config.efficiency_isentropic
+                h_ex_act = inlet_enthalpy_kj_kg - delta_h_act
+                st_out_act = IAPWS97(P=p_out_mpa, h=h_ex_act)
+                t_exhaust_c = st_out_act.T - 273.15
+                x_exhaust = st_out_act.x if st_out_act.x is not None else 1.0
+                engine_used = "IAPWS-IF97"
+        except Exception:
+            engine_used = "SIMPLIFIED_FALLBACK"
+
+    result.steam_engine = engine_used
+    result.inlet_entropy_kj_kg_k = s_in
+
     # Enthalpy drop
     delta_h_isentropic = inlet_enthalpy_kj_kg - h_out_isentropic
-    
     if delta_h_isentropic <= 0:
         result.valid = True
         result.turbine_power_kw = 0.0
         result.electrical_power_kw = 0.0
         result.errors.append("No enthalpy drop available for expansion")
         return result
-    
-    # Actual enthalpy drop (with isentropic efficiency)
+
     delta_h_actual = delta_h_isentropic * config.efficiency_isentropic
     result.enthalpy_drop_kj_kg = delta_h_actual
-    
-    # Outlet conditions
     result.outlet_enthalpy_kj_kg = inlet_enthalpy_kj_kg - delta_h_actual
-    result.exhaust_temperature_c = t_sat_out + 10  # slightly superheated exhaust
     result.exhaust_enthalpy_kj_kg = result.outlet_enthalpy_kj_kg
-    
-    # Turbine shaft power (kW)
-    # W = m_dot × Δh / 3600 (converting kg/h × kJ/kg to kW)
+    result.exhaust_temperature_c = t_exhaust_c
+    result.exhaust_vapor_quality = x_exhaust
+
+    # Turbine shaft power (kW): W = m_dot × Δh / 3600
     result.turbine_power_kw = steam_flow_kg_h * delta_h_actual / 3600.0
-    
-    # Electrical power output
+
+    # Electrical power output (accounting for mechanical and generator efficiency)
     result.electrical_power_kw = (
         result.turbine_power_kw * 
         config.mechanical_efficiency * 
         config.generator_efficiency
     )
-    
-    # Specific steam consumption
+
+    # Specific steam consumption (kg/kWh)
     if result.electrical_power_kw > 0:
         result.steam_rate_kg_kwh = steam_flow_kg_h / result.electrical_power_kw
     
