@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../services/api'
+import type { HealthResponse, SystemInfoResponse } from '../types'
 import {
   ArrowRight,
   Activity,
@@ -59,8 +60,8 @@ const PIPELINE_PHASES = [
 ]
 
 export default function OverviewPage() {
-  const [health, setHealth] = useState<any>(null)
-  const [systemStats, setSystemStats] = useState<any>(null)
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [systemStats, setSystemStats] = useState<SystemInfoResponse | null>(null)
 
   useEffect(() => {
     api.get('/health').then(setHealth).catch(() => {})

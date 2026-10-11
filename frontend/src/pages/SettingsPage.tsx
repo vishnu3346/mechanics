@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../services/api'
 import { useTheme } from '../context/ThemeContext'
+import type { SystemInfoResponse } from '../types'
 import {
   Settings,
   Server,
@@ -14,7 +15,7 @@ import {
 
 export default function SettingsPage() {
   const { theme, toggleTheme } = useTheme()
-  const [systemInfo, setSystemInfo] = useState<any>(null)
+  const [systemInfo, setSystemInfo] = useState<SystemInfoResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [saved, setSaved] = useState(false)
 

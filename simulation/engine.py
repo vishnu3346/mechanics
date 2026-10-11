@@ -687,5 +687,6 @@ def _scenario_description(sid: str) -> str:
         "severe_clumping": "Severe clumping conditions with degraded performance.",
         "high_throughput": "Increased waste feed rate at 800 kg/h.",
         "low_airflow": "Reduced airflow conditions affecting fluidization.",
+        "defluidized_agglomeration": "Bed agglomeration growth (a=0.85, d_eff=2.1mm) causing complete defluidization under nominal airflow.",
     }
     return descriptions.get(sid, "Custom scenario.")

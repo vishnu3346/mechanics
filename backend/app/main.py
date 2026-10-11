@@ -36,7 +36,7 @@ if PROJECT_ROOT_STR not in sys.path:
 from simulation.engine import (
     run_simulation, ScenarioParams, SCENARIOS, list_scenarios, get_scenario
 )
-from simulation.fluidization import generate_dp_curve, FluidizationConfig
+from simulation.fluidization import generate_dp_curve, FluidizationConfig, calculate_fluidization
 from ml.anomaly.predict import AnomalyPredictor
 from predict import load_vit_model, predict_vit
 from backend.app.database import (
@@ -340,6 +340,20 @@ async def get_scenarios():
     return {"scenarios": scenarios}
 
 
+@app.get("/api/scenarios/comparison")
+async def get_scenarios_comparison():
+    """Return physics and thermodynamic simulation results for all 8 scenarios without persisting runs."""
+    predictor = get_anomaly_predictor()
+    predictor_fn = predictor.predict if (predictor and predictor.loaded) else None
+    results = []
+    for sid, params in SCENARIOS.items():
+        res = run_simulation(params, anomaly_predictor=predictor_fn)
+        res["scenario_id"] = sid
+        res["id"] = sid
+        results.append(res)
+    return {"scenarios": results}
+
+
 @app.get("/api/scenarios/{scenario_id}")
 async def get_scenario_details(scenario_id: str):
     if scenario_id == "custom":
@@ -493,6 +507,27 @@ async def predict_anomaly(request: AnomalyRequest):
             "risk_level": "LOW",
             "model_loaded": False,
         }
+
+    # Evaluate physics fluidization state for physics-first diagnostics
+    try:
+        pr = request.plastic_ratio / 100.0 if request.plastic_ratio > 1.0 else request.plastic_ratio
+        fluid_res = calculate_fluidization(
+            airflow_m3_h=request.airflow,
+            reactor_temp_c=request.bed_temperature,
+            plastic_ratio=pr,
+        )
+        result["physics_state"] = fluid_res.physics_state
+        result["physics_reason"] = fluid_res.physics_reason
+        result["physics_risk_level"] = fluid_res.physics_risk_level
+        result["u0_m_s"] = round(fluid_res.u0, 4)
+        result["umf_effective_m_s"] = round(fluid_res.umf_effective, 4)
+        result["u0_over_umf_eff"] = round(fluid_res.u0_over_umf_eff, 4)
+        result["ut_m_s"] = round(fluid_res.ut, 4)
+        result["u0_over_ut"] = round(fluid_res.u0_over_ut, 4)
+    except Exception as e:
+        result["physics_state"] = "NORMAL_FLUIDIZATION"
+        result["physics_reason"] = str(e)
+        result["physics_risk_level"] = "LOW"
 
     return result
 

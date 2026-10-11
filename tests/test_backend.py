@@ -385,3 +385,33 @@ def test_fluidization_curve_endpoint():
     res_err = client.get("/api/fluidization/curve?airflow_m3_h=-10")
     assert res_err.status_code == 400
 
+
+def test_scenarios_comparison_endpoint():
+    """Verify GET /api/scenarios/comparison returns all 8 scenarios with required comparison fields."""
+    response = client.get("/api/scenarios/comparison")
+    assert response.status_code == 200
+    data = response.json()
+    assert "scenarios" in data
+    assert len(data["scenarios"]) == 8
+
+    # Verify each scenario has required comparison fields
+    for sc in data["scenarios"]:
+        assert "scenario_id" in sc
+        assert "equivalence_ratio" in sc
+        assert "fluidization" in sc
+        assert "u0_over_umf_eff" in sc["fluidization"]
+        assert "physics_state" in sc["fluidization"]
+        assert "whole_plant_closure" in sc
+        assert "net_electrical_power_kw" in sc["whole_plant_closure"]
+        assert "district_heat_kw" in sc["whole_plant_closure"]
+        assert "overall" in sc
+        assert "overall_efficiency_pct" in sc["overall"]
+        assert "reactor_heat_balance_kw" in sc
+
+    # Verify defluidized_agglomeration scenario is included
+    defluidized = [sc for sc in data["scenarios"] if sc["scenario_id"] == "defluidized_agglomeration"]
+    assert len(defluidized) == 1
+    assert defluidized[0]["fluidization"]["physics_state"] == "SEVERE_CLUMPING"
+    assert defluidized[0]["fluidization"]["u0_over_umf_eff"] < 1.0
+
+
