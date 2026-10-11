@@ -344,3 +344,40 @@ def test_websocket_shared_ticks_and_disconnect():
             _ = ws1.receive_json()
     finally:
         sim_manager.running = False
+
+
+def test_fluidization_curve_endpoint():
+    """Verify GET /api/fluidization/curve returns full hydrodynamic curves and metadata."""
+    response = client.get("/api/fluidization/curve")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Structural keys
+    assert "u_curve" in data
+    assert "dp_bed_curve" in data
+    assert "dp_distributor_curve" in data
+    assert "dp_total_curve" in data
+    assert "operating_point" in data
+    assert "umf" in data
+    assert "ut_m_s" in data
+    assert "geldart_group" in data
+    assert "assumptions" in data
+
+    # Numerical validity
+    assert len(data["u_curve"]) >= 50
+    assert len(data["dp_bed_curve"]) == len(data["u_curve"])
+    assert data["operating_point"]["regime"] == "bubbling"
+    assert data["geldart_group"] == "B"
+    assert data["umf"]["wen_yu_m_s"] > 0
+    assert data["ut_m_s"] > data["umf"]["wen_yu_m_s"]
+
+    # Test with parameter overrides
+    res_override = client.get("/api/fluidization/curve?airflow_m3_h=180&reactor_temp_c=870")
+    assert res_override.status_code == 200
+    data_override = res_override.json()
+    assert data_override["operating_point"]["u0_m_s"] > data["operating_point"]["u0_m_s"]
+
+    # Test edge case error handling
+    res_err = client.get("/api/fluidization/curve?airflow_m3_h=-10")
+    assert res_err.status_code == 400
+

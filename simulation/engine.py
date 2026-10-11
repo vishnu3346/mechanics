@@ -33,6 +33,7 @@ from simulation.steam_cycle import SteamConfig, calculate_steam_generation
 from simulation.turbine import TurbineConfig, calculate_turbine
 from simulation.heat_exchanger import HeatExchangerConfig, calculate_heat_exchanger
 from simulation.energy_balance import calculate_energy_balance
+from simulation.fluidization import FluidizationConfig, calculate_fluidization
 
 
 @dataclass
@@ -162,6 +163,7 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         nitrogen=params.nitrogen,
         sulfur=params.sulfur,
         chlorine=params.chlorine,
+        feedstock_lhv_mj_kg=feedstock_result.lhv_mj_kg,
     )
     gasification_result = calculate_gasification(gasifier_config)
     
@@ -174,16 +176,17 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         moisture_pct=params.moisture_pct,
     )
     
-    # 4. Anomaly detection
-    # Calculate pressure drop based on conditions
-    base_pressure_drop = 15.2  # kPa normal
-    pressure_drop = base_pressure_drop
-    if params.plastic_ratio > 0.35:
-        pressure_drop += (params.plastic_ratio - 0.35) * 80
-    if params.reactor_temp_c < 800:
-        pressure_drop += (800 - params.reactor_temp_c) * 0.05
-    if params.airflow_m3_h < 100:
-        pressure_drop += (100 - params.airflow_m3_h) * 0.1
+    # 4. Fluidization Hydrodynamics & Anomaly detection
+    fluid_config = FluidizationConfig()
+    fluid_result = calculate_fluidization(
+        airflow_m3_h=params.airflow_m3_h,
+        reactor_temp_c=params.reactor_temp_c,
+        pressure_kpa=params.pressure_kpa,
+        plastic_ratio=params.plastic_ratio,
+        config=fluid_config,
+    )
+    # Total pressure drop (kPa) derived from bed buoyant weight and distributor drop
+    pressure_drop = fluid_result.dp_total_kpa
     
     anomaly_features = {
         "bed_temperature": params.reactor_temp_c,
@@ -192,7 +195,7 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         "plastic_ratio": params.plastic_ratio * 100 if params.plastic_ratio <= 1 else params.plastic_ratio,
     }
     
-    # Derived features
+    # Derived features (compatible with existing ML model pipeline)
     anomaly_features["temperature_gradient"] = (850 - params.reactor_temp_c) / 100
     anomaly_features["airflow_deviation"] = (120 - params.airflow_m3_h) / 120
     anomaly_features["pressure_deviation"] = (pressure_drop - 15.2) / 15.2
@@ -215,9 +218,9 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         except Exception as e:
             anomaly_result["model_error"] = str(e)
     else:
-        # Rule-based fallback
+        # Rule-based fallback (informed by hydrodynamic defluidization risk and plastic/temp criteria)
         plastic_pct = anomaly_features["plastic_ratio"]
-        if plastic_pct >= 45 and params.reactor_temp_c < 780 and pressure_drop > 22:
+        if fluid_result.defluidization_risk >= 0.85 or (plastic_pct >= 45 and params.reactor_temp_c < 780):
             anomaly_result["state"] = "SEVERE_CLUMPING"
             anomaly_result["confidence"] = 0.92
             anomaly_result["risk_level"] = "CRITICAL"
@@ -225,7 +228,7 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
                 "Severe bed agglomeration detected. Reduce plastic feed ratio, "
                 "increase airflow, and raise bed temperature."
             )
-        elif plastic_pct >= 35 and (params.reactor_temp_c < 830 or pressure_drop > 17):
+        elif fluid_result.defluidization_risk >= 0.50 or (plastic_pct >= 35 and params.reactor_temp_c < 830):
             anomaly_result["state"] = "EARLY_AGGLOMERATION"
             anomaly_result["confidence"] = 0.78
             anomaly_result["risk_level"] = "MEDIUM"
@@ -314,6 +317,43 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
             "char_ash_kg_h": round(gasification_result.char_ash_kg_h, 2),
         },
         "mass_balance": mass_balance_result.details,
+        "fluidization": {
+            "u0_m_s": round(fluid_result.u0, 4),
+            "umf_m_s": round(fluid_result.umf_wen_yu, 4),
+            "umf_wen_yu_m_s": round(fluid_result.umf_wen_yu, 4),
+            "umf_ergun_m_s": round(fluid_result.umf_ergun, 4),
+            "umf_diff_pct": round(fluid_result.umf_diff_pct, 2),
+            "ut_m_s": round(fluid_result.ut, 4),
+            "u0_over_umf": round(fluid_result.u0_over_umf, 3),
+            "geldart_group": fluid_result.geldart_group,
+            "regime": fluid_result.regime,
+            "defluidization_risk": round(fluid_result.defluidization_risk, 3),
+            "umf_effective_m_s": round(fluid_result.umf_effective, 4),
+            "dp_bed_kpa": round(fluid_result.dp_bed_kpa, 3),
+            "dp_distributor_kpa": round(fluid_result.dp_distributor_kpa, 3),
+            "pressure_drop": round(fluid_result.dp_total_kpa, 3),
+            "pressure_drop_kpa": round(fluid_result.dp_total_kpa, 3),
+            "gas_density_kg_m3": round(fluid_result.rho_g, 4),
+            "gas_viscosity_pa_s": round(fluid_result.mu_g, 6),
+            "archimedes": round(fluid_result.archimedes, 2),
+            "defluidization_margin": round(fluid_result.defluidization_margin, 3),
+            "bubble_diameter_m": round(fluid_result.bubble_diameter_m, 4),
+            "bubble_velocity_m_s": round(fluid_result.bubble_velocity_m_s, 4),
+        },
+        # Top-level hydrodynamic keys for direct access
+        "u0_m_s": round(fluid_result.u0, 4),
+        "umf_m_s": round(fluid_result.umf_wen_yu, 4),
+        "umf_wen_yu_m_s": round(fluid_result.umf_wen_yu, 4),
+        "umf_ergun_m_s": round(fluid_result.umf_ergun, 4),
+        "ut_m_s": round(fluid_result.ut, 4),
+        "u0_over_umf": round(fluid_result.u0_over_umf, 3),
+        "geldart_group": fluid_result.geldart_group,
+        "regime": fluid_result.regime,
+        "defluidization_risk": round(fluid_result.defluidization_risk, 3),
+        "umf_effective_m_s": round(fluid_result.umf_effective, 4),
+        "dp_bed_kpa": round(fluid_result.dp_bed_kpa, 3),
+        "dp_distributor_kpa": round(fluid_result.dp_distributor_kpa, 3),
+        "pressure_drop": round(fluid_result.dp_total_kpa, 3),
         "anomaly": anomaly_result,
         "steam_cycle": {
             "steam_flow_kg_h": round(steam_result.steam_mass_flow_kg_h, 2),

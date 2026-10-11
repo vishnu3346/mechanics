@@ -36,6 +36,7 @@ class SteamConfig:
     target_steam_pressure_bar: float = 10.0
     target_steam_temp_c: float = 350.0
     latent_heat_kj_kg: float = 2257.0  # at atmospheric, varies with pressure
+    derive_from_heat: bool = True  # ASSUMPTION: Feedwater flow matches available syngas heat
 
 
 @dataclass
@@ -164,8 +165,12 @@ def calculate_steam_generation(
     # Convert kW to kJ/h: × 3600
     max_steam_kg_h = (available_boiler_kw * 3600) / delta_h
     
-    # Actual steam flow (limited by water supply)
-    result.steam_mass_flow_kg_h = min(config.water_flow_kg_h, max_steam_kg_h)
+    # Actual steam flow: derived from available heat by default, or clamped by water_flow_kg_h if derive_from_heat is False
+    # ASSUMPTION: In a balanced heat recovery boiler, steam output scales with available syngas thermal duty
+    if config.derive_from_heat:
+        result.steam_mass_flow_kg_h = max_steam_kg_h
+    else:
+        result.steam_mass_flow_kg_h = min(config.water_flow_kg_h, max_steam_kg_h)
     result.steam_temperature_c = target_temp
     
     # Actual boiler duty

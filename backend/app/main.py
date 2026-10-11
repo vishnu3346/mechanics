@@ -36,6 +36,7 @@ if PROJECT_ROOT_STR not in sys.path:
 from simulation.engine import (
     run_simulation, ScenarioParams, SCENARIOS, list_scenarios, get_scenario
 )
+from simulation.fluidization import generate_dp_curve, FluidizationConfig
 from ml.anomaly.predict import AnomalyPredictor
 from predict import load_vit_model, predict_vit
 from backend.app.database import (
@@ -433,6 +434,38 @@ async def validate_sim(request: SimulationRequest):
         errors.append("Temperature must be 400-1200°C")
 
     return {"valid": len(errors) == 0, "errors": errors}
+
+
+@app.get("/api/fluidization/curve")
+async def get_fluidization_curve(
+    scenario_id: Optional[str] = Query("normal"),
+    airflow_m3_h: Optional[float] = Query(None),
+    reactor_temp_c: Optional[float] = Query(None),
+    pressure_kpa: Optional[float] = Query(None),
+    plastic_ratio: Optional[float] = Query(None),
+):
+    """
+    Get dP vs U0 curve arrays, Umf values, operating point, Geldart group,
+    and reactor hydrodynamic design assumptions.
+    """
+    params = get_scenario(scenario_id) if (scenario_id and scenario_id != "custom") else ScenarioParams()
+    
+    # Overrides if supplied
+    af = airflow_m3_h if airflow_m3_h is not None else params.airflow_m3_h
+    temp = reactor_temp_c if reactor_temp_c is not None else params.reactor_temp_c
+    p = pressure_kpa if pressure_kpa is not None else params.pressure_kpa
+    pr = plastic_ratio if plastic_ratio is not None else params.plastic_ratio
+    
+    try:
+        curve_data = generate_dp_curve(
+            reactor_temp_c=temp,
+            pressure_kpa=p,
+            plastic_ratio=pr,
+            current_airflow_m3_h=af,
+        )
+        return curve_data
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Anomaly Detection ────────────────────────────────────────

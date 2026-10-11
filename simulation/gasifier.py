@@ -54,6 +54,8 @@ class GasifierConfig:
     nitrogen: float = 0.015
     sulfur: float = 0.002
     chlorine: float = 0.008
+    # Computed feedstock LHV (MJ/kg, dry basis or as-received)
+    feedstock_lhv_mj_kg: Optional[float] = None
 
 
 @dataclass
@@ -69,6 +71,8 @@ class GasificationResult:
     equivalence_ratio: float = 0.0
     syngas_flow_nm3_h: float = 0.0
     bed_temperature_c: float = 0.0
+    air_density_kg_m3: float = 0.0
+    air_viscosity_pa_s: float = 0.0
     valid: bool = True
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
@@ -119,9 +123,28 @@ def calculate_gasification(config: GasifierConfig) -> GasificationResult:
     o2_stoich_kg_h = (c_in * 32/12) + (h_in * 16/2) - o_in + (s_in * 32/32)
     o2_stoich_kg_h = max(0.0, o2_stoich_kg_h)
     
-    # Air input (assuming air density ~ 1.225 kg/m³ at standard conditions)
-    air_density = 1.225  # kg/m³
-    air_mass_kg_h = config.airflow_m3_h * air_density
+    # Air input:
+    # ASSUMPTION: config.airflow_m3_h is interpreted at normal conditions (0 °C, 101.325 kPa).
+    # Convert to actual volumetric flow at bed temperature and pressure:
+    temp = config.reactor_temp_c
+    t_kelvin = temp + 273.15
+    p_pa = config.pressure_kpa * 1000.0
+    r_air = 287.058  # J/(kg·K) specific gas constant for air
+
+    # Temperature-dependent air density at bed conditions via Ideal Gas Law (kg/m³):
+    air_density = p_pa / (r_air * t_kelvin)
+    result.air_density_kg_m3 = air_density
+
+    # Dynamic viscosity of air at bed temperature via Sutherland's law (Pa·s):
+    # Source: White (2006); Crane TP 410 (mu_ref = 1.716e-5 Pa·s at 273.15 K, S = 110.4 K)
+    air_viscosity = 1.716e-5 * ((t_kelvin / 273.15) ** 1.5) * ((273.15 + 110.4) / (t_kelvin + 110.4))
+    result.air_viscosity_pa_s = air_viscosity
+
+    # Actual volumetric flow rate at reactor conditions (m³/h):
+    actual_airflow_m3_h = config.airflow_m3_h * (t_kelvin / 273.15) * (101.325 / config.pressure_kpa)
+
+    # Air mass flow rate (kg/h): actual volumetric flow * temperature-dependent actual density
+    air_mass_kg_h = actual_airflow_m3_h * air_density
     o2_in_kg_h = air_mass_kg_h * 0.233  # 23.3% O2 by mass
     n2_in_kg_h = air_mass_kg_h * 0.767  # rest is N2
     
@@ -134,7 +157,6 @@ def calculate_gasification(config: GasifierConfig) -> GasificationResult:
     # Step 4: Carbon conversion (temperature dependent)
     # Higher temperature → higher conversion
     # Plastic content increases volatile yield
-    temp = config.reactor_temp_c
     base_conversion = min(0.99, max(0.3, 0.6 + 0.4 * (temp - 600) / 400))
     
     # Plastic increases conversion slightly (more volatiles)
@@ -167,26 +189,59 @@ def calculate_gasification(config: GasifierConfig) -> GasificationResult:
     # At ER < 0.5 (gasification range), we get more CO and H2
     er = result.equivalence_ratio
     
-    # Water-gas shift equilibrium constant approximation
-    # K_wgs = exp(4577.8/T - 4.33) where T in Kelvin
-    t_kelvin = temp + 273.15
-    k_wgs = math.exp(4577.8 / t_kelvin - 4.33)
-    
-    # Distribution of carbon products
+    # Distribution of carbon products before water-gas shift
     # CO fraction increases with temperature and decreases with ER
     co_fraction = min(0.7, max(0.1, 0.5 * (1.0 - er) + 0.2 * (temp - 700) / 300))
     co2_fraction = 1.0 - co_fraction
     
-    n_co = c_mol * co_fraction
-    n_co2 = c_mol * co2_fraction
-    
-    # Hydrogen products - affected by water-gas shift
-    # CO + H2O → CO2 + H2 (shift reaction)
-    shift_extent = min(h2o_mol * 0.3, n_co * 0.2)  # limited shift
-    n_co -= shift_extent
-    n_co2 += shift_extent
-    n_h2 = h_mol + shift_extent
-    n_h2o_out = max(0, h2o_mol - shift_extent + h_mol * 0.1)
+    n_co_0 = c_mol * co_fraction
+    n_co2_0 = c_mol * co2_fraction
+    n_h2_0 = h_mol
+    n_h2o_0 = h2o_mol
+
+    # Water-gas shift equilibrium constant (K_wgs)
+    # Reaction: CO + H2O <=> CO2 + H2
+    # Equilibrium constant correlation: K_wgs = exp(4577.8/T - 4.33), T in Kelvin
+    # Source: Boreskov et al.; Twigg (1989), Catalyst Handbook
+    k_wgs = math.exp(4577.8 / t_kelvin - 4.33)
+
+    # Equilibrium condition:
+    # (n_co2_0 + xi) * (n_h2_0 + xi) = K_wgs * (n_co_0 - xi) * (n_h2o_0 - xi)
+    # Quadratic: a_wgs * xi² + b_wgs * xi + c_wgs = 0
+    # a_wgs = (1.0 - k_wgs)
+    # b_wgs = (n_co2_0 + n_h2_0) + k_wgs * (n_co_0 + n_h2o_0)
+    # c_wgs = (n_co2_0 * n_h2_0) - k_wgs * (n_co_0 * n_h2o_0)
+    a_wgs = 1.0 - k_wgs
+    b_wgs = (n_co2_0 + n_h2_0) + k_wgs * (n_co_0 + n_h2o_0)
+    c_wgs = (n_co2_0 * n_h2_0) - k_wgs * (n_co_0 * n_h2o_0)
+
+    # Solve for equilibrium shift extent xi_eq
+    if abs(a_wgs) < 1e-6:
+        xi_eq = -c_wgs / b_wgs if abs(b_wgs) > 1e-9 else 0.0
+    else:
+        disc = b_wgs * b_wgs - 4.0 * a_wgs * c_wgs
+        if disc >= 0.0:
+            sqrt_disc = math.sqrt(disc)
+            xi_r1 = (-b_wgs + sqrt_disc) / (2.0 * a_wgs)
+            xi_r2 = (-b_wgs - sqrt_disc) / (2.0 * a_wgs)
+            max_forward = min(n_co_0, n_h2o_0)
+            max_reverse = min(n_co2_0, n_h2_0)
+            candidates = [r for r in [xi_r1, xi_r2] if -max_reverse <= r <= max_forward]
+            xi_eq = candidates[0] if candidates else 0.0
+        else:
+            xi_eq = 0.0
+
+    # ASSUMPTION: 80% approach to equilibrium (alpha_wgs = 0.80) due to finite residence time
+    alpha_wgs = 0.80
+    shift_extent = xi_eq * alpha_wgs
+
+    # Clamp shift extent so species moles remain non-negative
+    shift_extent = max(-0.95 * min(n_co2_0, n_h2_0), min(0.95 * min(n_co_0, n_h2o_0), shift_extent))
+
+    n_co = max(0.0, n_co_0 - shift_extent)
+    n_co2 = max(0.0, n_co2_0 + shift_extent)
+    n_h2 = max(0.0, n_h2_0 + shift_extent)
+    n_h2o_out = max(0.0, n_h2o_0 - shift_extent)
     
     # Nitrogen (from fuel + air)
     n_n2 = n_mol_fuel + n_mol_air
@@ -246,7 +301,9 @@ def calculate_gasification(config: GasifierConfig) -> GasificationResult:
     result.thermal_energy_kw = result.syngas_flow_nm3_h * result.syngas_lhv_mj_nm3 * 1000 / 3600
     
     # Gasification efficiency (cold gas efficiency)
-    chemical_input_kw = config.waste_feed_kg_h * 15.0 * 1000 / 3600  # approximate LHV ~15 MJ/kg
+    # Use computed feedstock LHV when provided, falling back to 15.0 MJ/kg
+    feedstock_lhv = config.feedstock_lhv_mj_kg if config.feedstock_lhv_mj_kg is not None else 15.0
+    chemical_input_kw = config.waste_feed_kg_h * feedstock_lhv * 1000.0 / 3600.0
     if chemical_input_kw > 0:
         result.gasification_efficiency = min(0.95, result.thermal_energy_kw / chemical_input_kw)
     
