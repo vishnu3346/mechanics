@@ -43,16 +43,35 @@ export interface AnomalyResult {
 export interface OverallResult {
   waste_input_kw: number;
   electrical_output_kw: number;
+  net_power_kw?: number;
   heat_recovery_kw: number;
   total_useful_kw: number;
   overall_efficiency_pct: number;
   gasification_efficiency_pct: number;
+  cold_gas_efficiency_pct?: number;
+}
+
+export interface ScenarioParams extends Partial<SimParams> {
+  name?: string;
+  boiler_efficiency?: number;
+  turbine_efficiency?: number;
+  glass_ratio?: number;
+  infectious_ratio?: number;
+  carbon?: number;
+  hydrogen?: number;
+  oxygen?: number;
+  nitrogen?: number;
+  sulfur?: number;
+  chlorine?: number;
+  ash?: number;
+  [key: string]: any;
 }
 
 export interface Scenario {
   id: string;
   name: string;
   description: string;
+  parameters?: ScenarioParams;
 }
 
 export interface Detection {

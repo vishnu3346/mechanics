@@ -342,12 +342,16 @@ def run_simulation(params: ScenarioParams, anomaly_predictor=None) -> dict:
         "overall": {
             "waste_input_kw": round(feedstock_result.chemical_energy_kw, 2),
             "electrical_output_kw": round(turbine_result.electrical_power_kw, 2),
+            "net_power_kw": round(turbine_result.electrical_power_kw, 2),
             "heat_recovery_kw": round(hx_result.recovered_heat_kw, 2),
             "total_useful_kw": round(
                 turbine_result.electrical_power_kw + hx_result.recovered_heat_kw, 2
             ),
             "overall_efficiency_pct": round(energy_result.overall_efficiency * 100, 2),
             "gasification_efficiency_pct": round(
+                gasification_result.gasification_efficiency * 100, 2
+            ),
+            "cold_gas_efficiency_pct": round(
                 gasification_result.gasification_efficiency * 100, 2
             ),
         },

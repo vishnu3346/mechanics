@@ -9,6 +9,7 @@ import {
   Layers,
   Sparkles,
   Sliders,
+  AlertTriangle,
 } from 'lucide-react'
 
 export default function EnergyPage() {
@@ -19,23 +20,26 @@ export default function EnergyPage() {
 
   const [loading, setLoading] = useState<boolean>(false)
   const [simData, setSimData] = useState<SimulationResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const fetchEnergyData = async () => {
     setLoading(true)
+    setError(null)
     try {
-      const res = await api.post('/simulation/step', {
+      const res = await api.post('/simulation/run', {
         waste_feed_kg_h: feedRate,
         plastic_ratio: plasticPct / 100,
         moisture_pct: moisturePct,
         reactor_temp_c: 850,
         airflow_m3_h: 120,
         pressure_kpa: 101.3,
-        boiler_eff: 0.82,
-        turbine_eff: turbineEff / 100,
+        boiler_efficiency: 0.82,
+        turbine_efficiency: turbineEff / 100,
       })
       setSimData(res)
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      setError(e.message || 'Failed to fetch thermodynamic balances from server')
     } finally {
       setLoading(false)
     }
@@ -45,31 +49,57 @@ export default function EnergyPage() {
     fetchEnergyData()
   }, [])
 
-  const gasification = simData?.gasification || {
+  const isDemo = !simData
+
+  const gasification = simData?.gasification ? {
+    syngas_flow_nm3_h: simData.gasification.syngas_flow_nm3_h,
+    syngas_lhv_mj_nm3: simData.gasification.syngas_lhv_mj_nm3,
+    syngas_power_kw: simData.gasification.thermal_energy_kw ?? simData.gasification.syngas_power_kw,
+  } : {
     syngas_flow_nm3_h: 240.1,
     syngas_lhv_mj_nm3: 4.11,
     syngas_power_kw: 274.2,
   }
 
-  const steam = simData?.steam_cycle || {
+  const steam = simData?.steam_cycle ? {
+    steam_flow_kg_h: simData.steam_cycle.steam_flow_kg_h,
+    steam_pressure_bar: simData.steam_cycle.steam_pressure_bar,
+    steam_temp_c: simData.steam_cycle.steam_temp_c,
+    heat_absorbed_kw: simData.steam_cycle.boiler_duty_kw ?? simData.steam_cycle.heat_absorbed_kw,
+  } : {
     steam_flow_kg_h: 200.0,
     steam_pressure_bar: 10.0,
     steam_temp_c: 350.0,
     heat_absorbed_kw: 185.0,
   }
 
-  const turbine = simData?.turbine || {
+  const turbine = simData?.turbine ? {
+    gross_power_kw: simData.turbine.turbine_power_kw ?? simData.turbine.gross_power_kw,
+    parasitic_load_kw: Math.max(0, (simData.turbine.turbine_power_kw ?? 0) - (simData.turbine.electrical_power_kw ?? 0)),
+    electrical_power_kw: simData.turbine.electrical_power_kw,
+  } : {
     gross_power_kw: 16.5,
     parasitic_load_kw: 3.0,
     electrical_power_kw: 13.5,
   }
 
-  const heatExchanger = simData?.heat_exchanger || {
+  const heatExchanger = simData?.heat_exchanger ? {
+    heat_recovered_kw: simData.heat_exchanger.recovered_heat_kw ?? simData.heat_exchanger.heat_recovered_kw,
+    hot_water_temp_c: simData.heat_exchanger.hot_water_temp_c,
+  } : {
     heat_recovered_kw: 17.4,
     hot_water_temp_c: 85.0,
   }
 
-  const overall = simData?.overall || {
+  const overall = simData?.overall ? {
+    waste_input_kw: simData.overall.waste_input_kw,
+    electrical_output_kw: simData.overall.electrical_output_kw,
+    heat_recovery_kw: simData.overall.heat_recovery_kw,
+    total_useful_kw: simData.overall.total_useful_kw,
+    electrical_efficiency_pct: (simData.overall.electrical_output_kw / (simData.overall.waste_input_kw || 1)) * 100,
+    gasification_efficiency_pct: simData.overall.gasification_efficiency_pct,
+    overall_efficiency_pct: simData.overall.overall_efficiency_pct,
+  } : {
     waste_input_kw: 522.5,
     electrical_output_kw: 13.5,
     heat_recovery_kw: 17.4,
@@ -84,10 +114,22 @@ export default function EnergyPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl lg:text-2xl font-black tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
-            <Zap className="text-amber-500" size={24} />
-            <span>Thermodynamic Energy Balance & CHP Cogeneration</span>
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl lg:text-2xl font-black tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
+              <Zap className="text-amber-500" size={24} />
+              <span>Thermodynamic Energy Balance & CHP Cogeneration</span>
+            </h1>
+            {isDemo && (
+              <span className="badge badge-warning font-mono font-bold text-[10px] px-2 py-0.5">
+                DEMO DATA
+              </span>
+            )}
+            {!isDemo && (
+              <span className="badge badge-success font-mono font-bold text-[10px] px-2 py-0.5">
+                LIVE SIMULATION
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 font-normal">
             First & Second Law energy cascading: Feedstock Enthalpy → Syngas Chemical Energy → Rankine Power & 85°C Hospital Heat
           </p>
@@ -101,6 +143,27 @@ export default function EnergyPage() {
           {loading ? 'Computing Enthalpies...' : 'Recalculate Energy Flow'}
         </button>
       </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="p-4 bg-rose-50 border border-rose-300 dark:bg-rose-500/10 dark:border-rose-500/30 rounded-lg text-rose-800 dark:text-rose-300 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="shrink-0 text-rose-600 dark:text-rose-400" />
+            <div>
+              <span className="font-bold">Simulation Request Failed:</span> {error}
+              <div className="text-[11px] text-rose-700 dark:text-rose-400 mt-0.5 font-medium">
+                The values shown below are fallback DEMO DATA and do not reflect current inputs.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={fetchEnergyData}
+            className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded text-xs transition shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Top Level KPIs in Frosted Glass Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">

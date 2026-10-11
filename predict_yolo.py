@@ -6,8 +6,9 @@ def main():
         print("Usage: python predict_yolo.py <path_to_image>")
         sys.exit(1)
         
-    # Load the custom trained model
-    model = YOLO(r"c:\Users\vishn\OneDrive\Desktop\mechanics\runs\detect\medical_waste_yolo\run1\weights\best.pt")
+    from pathlib import Path
+    model_path = Path(__file__).resolve().parent / "runs" / "detect" / "medical_waste_yolo" / "run1" / "weights" / "best.pt"
+    model = YOLO(str(model_path))
     
     image_path = sys.argv[1]
     

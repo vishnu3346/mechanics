@@ -12,39 +12,64 @@ import os
 import sys
 import json
 import time
+import io
+import copy
+import random
 import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Set, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from PIL import Image
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Add project root to path
-PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT_STR = str(PROJECT_ROOT)
+if PROJECT_ROOT_STR not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_STR)
 
 from simulation.engine import (
     run_simulation, ScenarioParams, SCENARIOS, list_scenarios, get_scenario
 )
 from ml.anomaly.predict import AnomalyPredictor
+from predict import load_vit_model, predict_vit
+from backend.app.database import (
+    init_db, add_history_record, get_history_records, get_history_record_by_id, count_history_records
+)
 
-# Global state
+# Global models and state
 anomaly_predictor: Optional[AnomalyPredictor] = None
-simulation_history: list = []
-active_simulations: dict = {}
+
+# YOLO state
+yolo_model: Any = None
+yolo_model_loaded: bool = False
+yolo_weights_path = PROJECT_ROOT / "runs" / "detect" / "medical_waste_yolo" / "run1" / "weights" / "best.pt"
+
+# ViT state
+vit_model: Any = None
+vit_transforms: Any = None
+vit_classes: List[str] = []
+vit_device: Any = None
+vit_model_loaded: bool = False
+vit_weights_path = PROJECT_ROOT / "vit_pbw_model.pth"
+
+# File constraints
+MAX_IMAGE_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+ALLOWED_IMAGE_MIME = {
+    "image/jpeg", "image/png", "image/webp", "image/avif", "image/bmp", "image/tiff"
+}
 
 
 def get_anomaly_predictor() -> AnomalyPredictor:
     """Get or lazily initialize the anomaly predictor."""
     global anomaly_predictor
     if anomaly_predictor is None:
-        model_dir = os.path.join(PROJECT_ROOT, "models")
+        model_dir = str(PROJECT_ROOT / "models")
         try:
             anomaly_predictor = AnomalyPredictor(model_dir)
         except Exception as e:
@@ -57,12 +82,176 @@ def get_anomaly_predictor() -> AnomalyPredictor:
     return anomaly_predictor
 
 
+def init_yolo_model() -> None:
+    """Load trained YOLO model at startup."""
+    global yolo_model, yolo_model_loaded
+    if yolo_weights_path.exists():
+        try:
+            from ultralytics import YOLO
+            yolo_model = YOLO(str(yolo_weights_path))
+            yolo_model_loaded = True
+            print(f"YOLO model loaded from {yolo_weights_path}")
+        except Exception as e:
+            print(f"Warning: Could not load YOLO model: {e}")
+            yolo_model = None
+            yolo_model_loaded = False
+    else:
+        print(f"Warning: YOLO weights file not found at {yolo_weights_path}")
+        yolo_model = None
+        yolo_model_loaded = False
+
+
+def init_vit_model() -> None:
+    """Load trained ViT model at startup."""
+    global vit_model, vit_transforms, vit_classes, vit_device, vit_model_loaded
+    if vit_weights_path.exists():
+        try:
+            vit_model, vit_transforms, vit_classes, vit_device = load_vit_model(vit_weights_path)
+            vit_model_loaded = True
+            print(f"ViT model loaded from {vit_weights_path} on {vit_device}")
+        except Exception as e:
+            print(f"Warning: Could not load ViT model: {e}")
+            vit_model = None
+            vit_model_loaded = False
+    else:
+        print(f"Warning: ViT weights file not found at {vit_weights_path}")
+        vit_model = None
+        vit_model_loaded = False
+
+
+# ── Shared WebSocket Simulation Manager ──────────────────────
+
+class SharedSimulationManager:
+    """
+    Manages a single shared plant simulation loop and WebSocket broadcasts.
+    All connected clients observe the exact same plant simulation state.
+    """
+
+    def __init__(self):
+        self.connections: Set[WebSocket] = set()
+        self.running: bool = False
+        self.speed: float = 1.0
+        self.params: ScenarioParams = ScenarioParams()
+        self.scenario_id: str = "normal"
+        self.tick: int = 0
+        self.last_result: Optional[Dict[str, Any]] = None
+        self._task: Optional[asyncio.Task] = None
+        self._is_active: bool = True
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self.connections.add(ws)
+
+        # Immediately send current state if available
+        if self.last_result:
+            try:
+                await ws.send_json(self.last_result)
+            except Exception:
+                pass
+        else:
+            try:
+                await ws.send_json({
+                    "running": self.running,
+                    "tick": self.tick,
+                    "speed": self.speed,
+                    "scenario_id": self.scenario_id,
+                })
+            except Exception:
+                pass
+
+    async def disconnect(self, ws: WebSocket) -> None:
+        async with self._lock:
+            self.connections.discard(ws)
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        async with self._lock:
+            clients = list(self.connections)
+        disconnected = []
+        for ws in clients:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                disconnected.append(ws)
+        if disconnected:
+            async with self._lock:
+                for ws in disconnected:
+                    self.connections.discard(ws)
+
+    def start_background_loop(self) -> None:
+        if self._task is None or self._task.done():
+            self._is_active = True
+            self._task = asyncio.create_task(self._run_loop())
+
+    async def stop_background_loop(self) -> None:
+        self._is_active = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _run_loop(self) -> None:
+        while self._is_active:
+            try:
+                if self.running:
+                    speed = max(0.1, self.speed)
+                    p = copy.deepcopy(self.params)
+
+                    # Realistic small stochastic fluctuations
+                    p.reactor_temp_c += random.gauss(0, 1.2) * min(speed, 2.0)
+                    p.airflow_m3_h += random.gauss(0, 0.7) * min(speed, 2.0)
+
+                    predictor = get_anomaly_predictor()
+                    predictor_fn = predictor.predict if (predictor and predictor.loaded) else None
+                    result = run_simulation(p, anomaly_predictor=predictor_fn)
+                    result["tick"] = self.tick
+                    result["sim_time_s"] = self.tick * 5
+                    result["speed"] = speed
+                    result["running"] = True
+                    result["scenario_id"] = self.scenario_id
+                    result["scenario_name"] = self.params.name
+
+                    self.last_result = result
+                    await self.broadcast(result)
+                    self.tick += 1
+
+                    sleep_time = max(0.2, 2.0 / speed)
+                    await asyncio.sleep(sleep_time)
+                else:
+                    await asyncio.sleep(0.3)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in shared simulation loop: {e}")
+                await asyncio.sleep(1.0)
+
+
+sim_manager = SharedSimulationManager()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown."""
+    # 1. Initialize persistent SQLite database
+    await init_db()
+
+    # 2. Lazy or eager models initialization
     get_anomaly_predictor()
+    init_yolo_model()
+    init_vit_model()
+
+    # 3. Start shared simulation background task
+    sim_manager.start_background_loop()
+
     yield
-    print("Shutting down...")
+
+    # Shutdown
+    print("Shutting down background tasks...")
+    await sim_manager.stop_background_loop()
 
 
 app = FastAPI(
@@ -104,21 +293,20 @@ class AnomalyRequest(BaseModel):
     plastic_ratio: float = 20.0
 
 
-class VisionResponse(BaseModel):
-    detections: list = []
-    class_counts: dict = {}
-    mode: str = "demo"
-    total_objects: int = 0
-
-
 # ── Health ────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
+    if not yolo_model_loaded and yolo_weights_path.exists():
+        init_yolo_model()
+    if not vit_model_loaded and vit_weights_path.exists():
+        init_vit_model()
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "anomaly_model_loaded": anomaly_predictor.loaded if anomaly_predictor else False,
+        "yolo_model_loaded": yolo_model_loaded,
+        "vit_model_loaded": vit_model_loaded,
         "version": "1.0.0",
         "disclaimer": (
             "Engineering simulation prototype. Results are model-based approximations "
@@ -151,7 +339,6 @@ async def get_scenarios():
     return {"scenarios": scenarios}
 
 
-
 @app.get("/api/scenarios/{scenario_id}")
 async def get_scenario_details(scenario_id: str):
     if scenario_id == "custom":
@@ -168,19 +355,18 @@ async def run_scenario_endpoint(scenario_id: str):
     return {"result": res, **res}
 
 
-
 # ── Simulation ────────────────────────────────────────────────
 
 @app.post("/api/simulation/run")
 async def run_sim(request: SimulationRequest):
-    """Run a complete simulation."""
+    """Run a complete simulation and persist run in database."""
     # Get base scenario
     if request.scenario_id and request.scenario_id != "custom":
         params = get_scenario(request.scenario_id)
         params = ScenarioParams(**params.__dict__)  # copy
     else:
         params = ScenarioParams(name="Custom Scenario")
-    
+
     # Override with request values
     if request.waste_feed_kg_h is not None:
         params.waste_feed_kg_h = request.waste_feed_kg_h
@@ -202,7 +388,7 @@ async def run_sim(request: SimulationRequest):
         params.boiler_efficiency = request.boiler_efficiency
     if request.turbine_efficiency is not None:
         params.turbine_efficiency = request.turbine_efficiency
-    
+
     # Ensure ratios sum properly
     if params.plastic_ratio + params.organic_ratio > 0.95:
         params.glass_ratio = 0.025
@@ -211,12 +397,13 @@ async def run_sim(request: SimulationRequest):
         remaining = 1.0 - params.plastic_ratio - params.organic_ratio
         params.glass_ratio = remaining * 0.33
         params.infectious_ratio = remaining * 0.67
-    
+
     # Run simulation with anomaly predictor
-    predictor_fn = anomaly_predictor.predict if (anomaly_predictor and anomaly_predictor.loaded) else None
+    predictor = get_anomaly_predictor()
+    predictor_fn = predictor.predict if (predictor and predictor.loaded) else None
     result = run_simulation(params, anomaly_predictor=predictor_fn)
-    
-    # Save to history
+
+    # Save to persistent database
     history_entry = {
         "id": result["scenario_id"],
         "timestamp": datetime.now().isoformat(),
@@ -225,11 +412,8 @@ async def run_sim(request: SimulationRequest):
         "overall": result["overall"],
         "anomaly_state": result["anomaly"]["state"],
     }
-    simulation_history.append(history_entry)
-    # Keep last 100
-    if len(simulation_history) > 100:
-        simulation_history.pop(0)
-    
+    await add_history_record(history_entry, full_result=result)
+
     return result
 
 
@@ -247,7 +431,7 @@ async def validate_sim(request: SimulationRequest):
         errors.append("Airflow must be positive")
     if request.reactor_temp_c is not None and not (400 <= request.reactor_temp_c <= 1200):
         errors.append("Temperature must be 400-1200°C")
-    
+
     return {"valid": len(errors) == 0, "errors": errors}
 
 
@@ -265,7 +449,7 @@ async def predict_anomaly(request: AnomalyRequest):
         "airflow_deviation": (120 - request.airflow) / 120,
         "pressure_deviation": (request.pressure_drop - 15.2) / 15.2,
     }
-    
+
     predictor = get_anomaly_predictor()
     if predictor and predictor.loaded:
         result = predictor.predict(features)
@@ -276,86 +460,60 @@ async def predict_anomaly(request: AnomalyRequest):
             "risk_level": "LOW",
             "model_loaded": False,
         }
-    
+
     return result
 
 
-# ── Vision ────────────────────────────────────────────────────
+# ── Vision Inference (YOLO) ──────────────────────────────────
 
 @app.post("/api/vision/inference")
-async def vision_inference(file: UploadFile = File(None)):
-    """Run waste detection inference."""
-    # Demo mode: return synthetic detections
-    import random
-    random.seed(42)
-    
-    classes = ["Infectious", "Plastic", "Glass", "Organic"]
-    colors = {
-        "Infectious": "#ef4444",
-        "Plastic": "#3b82f6", 
-        "Glass": "#8b5cf6",
-        "Organic": "#22c55e",
-    }
-    
-    detections = []
-    n_objects = random.randint(3, 8)
-    
-    for i in range(n_objects):
-        cls = random.choice(classes)
-        detections.append({
-            "id": i,
-            "class": cls,
-            "confidence": round(random.uniform(0.65, 0.98), 3),
-            "bbox": {
-                "x": random.randint(50, 400),
-                "y": random.randint(50, 300),
-                "width": random.randint(40, 120),
-                "height": random.randint(40, 120),
-            },
-            "color": colors[cls],
-        })
-    
-    class_counts = {}
-    for d in detections:
-        cls = d["class"]
-        class_counts[cls] = class_counts.get(cls, 0) + 1
-    
-    mode = "demo"
-    
-    # Try real inference if model exists
-    yolo_path = os.path.join(PROJECT_ROOT, "weights", "yolo26n.pt")
-    yolo_path_alt = os.path.join(PROJECT_ROOT, "yolov8s.pt")
-    
-    if file and (os.path.exists(yolo_path) or os.path.exists(yolo_path_alt)):
+async def vision_inference(
+    file: Optional[UploadFile] = File(None),
+    synthetic: Optional[bool] = Query(None),
+):
+    """
+    Run YOLOv8 waste detection inference on an uploaded image,
+    or opt-in to synthetic demo detection.
+    """
+    # 1. Real inference branch when image file is uploaded
+    if file is not None and file.filename:
+        if not yolo_model_loaded and yolo_weights_path.exists():
+            init_yolo_model()
+        if not yolo_weights_path.exists() or not yolo_model_loaded or yolo_model is None:
+            rel_path = yolo_weights_path.relative_to(PROJECT_ROOT).as_posix()
+            raise HTTPException(
+                status_code=503,
+                detail=f"YOLO model weights not found or failed to load. Expected weights at '{rel_path}'."
+            )
+
         try:
-            from ultralytics import YOLO
-            from PIL import Image
-            import io
-            
-            model_file = yolo_path if os.path.exists(yolo_path) else yolo_path_alt
-            model = YOLO(model_file)
-            
             contents = await file.read()
-            image = Image.open(io.BytesIO(contents))
-            
-            results = model(image, conf=0.25)
-            
+            if len(contents) > MAX_IMAGE_FILE_SIZE:
+                raise HTTPException(status_code=413, detail="File too large (exceeds 20MB limit).")
+            if len(contents) == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            results = yolo_model(image, conf=0.25)
+
             detections = []
-            class_map = {0: "General", 1: "Infectious", 2: "Pathological", 3: "Sharps"}
+            class_map = getattr(yolo_model, "names", {
+                0: "General", 1: "Infectious", 2: "Pathological", 3: "Sharps"
+            })
             color_map = {
                 "General": "#3b82f6",
                 "Infectious": "#ef4444",
                 "Pathological": "#f59e0b",
                 "Sharps": "#8b5cf6",
             }
-            
+
             for r in results:
                 for i, box in enumerate(r.boxes):
                     cls_id = int(box.cls[0])
                     cls_name = class_map.get(cls_id, f"Class_{cls_id}")
                     conf = float(box.conf[0])
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    
+
                     detections.append({
                         "id": i,
                         "class": cls_name,
@@ -368,22 +526,139 @@ async def vision_inference(file: UploadFile = File(None)):
                         },
                         "color": color_map.get(cls_name, "#6b7280"),
                     })
-            
-            class_counts = {}
+
+            class_counts: Dict[str, int] = {}
             for d in detections:
-                cls = d["class"]
-                class_counts[cls] = class_counts.get(cls, 0) + 1
-            
-            mode = "inference"
+                cls_name = d["class"]
+                class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+
+            return {
+                "detections": detections,
+                "class_counts": class_counts,
+                "total_objects": len(detections),
+                "mode": "inference",
+                "synthetic": False,
+            }
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"YOLO inference error: {e}")
-            mode = "demo"
-    
+            raise HTTPException(status_code=500, detail=f"YOLO inference error: {str(e)}")
+
+    # 2. No file provided: check if synthetic demo mode is allowed
+    if synthetic is False:
+        raise HTTPException(
+            status_code=400,
+            detail="No image file provided and synthetic demo mode is explicitly disabled."
+        )
+
+    # Opt-in synthetic demo detection
+    rnd = random.Random(42)
+    demo_classes = ["Infectious", "Plastic", "Glass", "Organic"]
+    demo_colors = {
+        "Infectious": "#ef4444",
+        "Plastic": "#3b82f6",
+        "Glass": "#8b5cf6",
+        "Organic": "#22c55e",
+    }
+
+    detections = []
+    n_objects = rnd.randint(3, 8)
+    for i in range(n_objects):
+        cls_name = rnd.choice(demo_classes)
+        detections.append({
+            "id": i,
+            "class": cls_name,
+            "confidence": round(rnd.uniform(0.65, 0.98), 3),
+            "bbox": {
+                "x": rnd.randint(50, 400),
+                "y": rnd.randint(50, 300),
+                "width": rnd.randint(40, 120),
+                "height": rnd.randint(40, 120),
+            },
+            "color": demo_colors[cls_name],
+        })
+
+    class_counts = {}
+    for d in detections:
+        cls_name = d["class"]
+        class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+
     return {
         "detections": detections,
         "class_counts": class_counts,
         "total_objects": len(detections),
-        "mode": mode,
+        "mode": "demo",
+        "synthetic": True,
+    }
+
+
+# ── Vision Classification (ViT-B/16) ─────────────────────────
+
+@app.post("/api/vision/classify")
+async def vision_classify(file: UploadFile = File(...)):
+    """
+    Classify biomedical/pharmaceutical waste image using ViT-B/16.
+    Returns top-3 predicted classes with confidence probabilities.
+    """
+    if file is None or not file.filename:
+        raise HTTPException(status_code=400, detail="No image file provided.")
+
+    # 1. Validate file extension and MIME type
+    content_type = (file.content_type or "").lower()
+    allowed_exts = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tiff"}
+    ext = Path(file.filename).suffix.lower()
+    if content_type not in ALLOWED_IMAGE_MIME and ext not in allowed_exts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type '{content_type or ext}'. Only image files (JPEG, PNG, WebP, AVIF) are accepted."
+        )
+
+    # 2. Check if model is loaded
+    if not vit_model_loaded and vit_weights_path.exists():
+        init_vit_model()
+    if not vit_model_loaded or vit_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ViT model is not loaded. Model file vit_pbw_model.pth missing or corrupted."
+        )
+
+    # 3. Read content and validate size
+    contents = await file.read()
+    if len(contents) > MAX_IMAGE_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds maximum allowed size of {MAX_IMAGE_FILE_SIZE // (1024*1024)}MB."
+        )
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # 4. Decode image
+    try:
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot decode image file: {str(e)}")
+
+    # 5. Run inference
+    try:
+        predictions = predict_vit(
+            model=vit_model,
+            transforms=vit_transforms,
+            classes=vit_classes,
+            device=vit_device,
+            image=image,
+            top_k=3,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ViT classification inference failed: {str(e)}")
+
+    return {
+        "filename": file.filename,
+        "top_predictions": predictions,
+        "predicted_class": predictions[0]["class"] if predictions else "Unknown",
+        "confidence_pct": predictions[0]["confidence_pct"] if predictions else 0.0,
+        "probability": predictions[0]["probability"] if predictions else 0.0,
+        "device": str(vit_device),
+        "model": "ViT-B/16-PBW",
     }
 
 
@@ -391,153 +666,111 @@ async def vision_inference(file: UploadFile = File(None)):
 
 @app.get("/api/simulation/status")
 async def simulation_status():
+    hist_count = await count_history_records()
     return {
-        "active_simulations": len(active_simulations),
-        "history_count": len(simulation_history),
+        "active_simulations": 1 if sim_manager.running else 0,
+        "connected_clients": len(sim_manager.connections),
+        "history_count": hist_count,
+        "sim_running": sim_manager.running,
+        "sim_tick": sim_manager.tick,
     }
 
 
 # ── History ───────────────────────────────────────────────────
 
 @app.get("/api/history")
-async def get_history():
-    return {"history": list(reversed(simulation_history))}
+async def get_history(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Retrieve paginated simulation history records."""
+    records, total = await get_history_records(limit=limit, offset=offset)
+    return {
+        "history": records,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/api/history/{sim_id}")
 async def get_history_entry(sim_id: str):
-    for entry in simulation_history:
-        if entry["id"] == sim_id:
-            return entry
-    raise HTTPException(status_code=404, detail="Simulation not found")
+    """Retrieve full simulation result for a specific run ID."""
+    entry = await get_history_record_by_id(sim_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Simulation run '{sim_id}' not found")
+    return entry
 
 
-# ── WebSocket ─────────────────────────────────────────────────
-
-class SimulationManager:
-    """Manages WebSocket simulation sessions."""
-    
-    def __init__(self):
-        self.connections: dict[str, WebSocket] = {}
-        self.running: dict[str, bool] = {}
-        self.speed: dict[str, float] = {}
-        self.params: dict[str, ScenarioParams] = {}
-    
-    async def connect(self, ws: WebSocket, session_id: str):
-        await ws.accept()
-        self.connections[session_id] = ws
-        self.running[session_id] = False
-        self.speed[session_id] = 1.0
-        self.params[session_id] = ScenarioParams()
-    
-    def disconnect(self, session_id: str):
-        self.connections.pop(session_id, None)
-        self.running.pop(session_id, None)
-        self.speed.pop(session_id, None)
-        self.params.pop(session_id, None)
-    
-    async def run_live(self, session_id: str):
-        """Run live simulation loop."""
-        ws = self.connections.get(session_id)
-        if not ws:
-            return
-        
-        tick = 0
-        self.running[session_id] = True
-        
-        while self.running.get(session_id, False):
-            params = self.params.get(session_id, ScenarioParams())
-            speed = self.speed.get(session_id, 1.0)
-            
-            # Add small time-varying perturbations for realism
-            import random
-            import copy
-            p = copy.deepcopy(params)
-            
-            # Small oscillations
-            p.reactor_temp_c += random.gauss(0, 2) * speed
-            p.airflow_m3_h += random.gauss(0, 1) * speed
-            
-            # Run simulation
-            predictor_fn = anomaly_predictor.predict if (anomaly_predictor and anomaly_predictor.loaded) else None
-            result = run_simulation(p, anomaly_predictor=predictor_fn)
-            result["tick"] = tick
-            result["sim_time_s"] = tick * 5  # 5 seconds per tick
-            result["speed"] = speed
-            result["running"] = True
-            
-            try:
-                await ws.send_json(result)
-            except Exception:
-                break
-            
-            tick += 1
-            await asyncio.sleep(max(0.5, 2.0 / speed))
-        
-        # Send stopped signal
-        try:
-            await ws.send_json({"running": False, "tick": tick})
-        except Exception:
-            pass
-
-
-sim_manager = SimulationManager()
-
+# ── Shared WebSocket Simulation ──────────────────────────────
 
 @app.websocket("/ws/simulation")
 async def websocket_simulation(ws: WebSocket):
-    session_id = str(uuid.uuid4())[:8]
-    await sim_manager.connect(ws, session_id)
-    
+    """
+    Subscribes client to the single shared plant simulation loop.
+    All connected clients observe and manipulate the shared digital twin.
+    """
+    await sim_manager.connect(ws)
+
     try:
         while True:
             data = await ws.receive_json()
             action = data.get("action", "")
-            
+
             if action == "start":
-                # Load scenario
-                scenario_id = data.get("scenario_id", "normal")
+                scenario_id = data.get("scenario_id", sim_manager.scenario_id)
                 if scenario_id in SCENARIOS:
-                    sim_manager.params[session_id] = ScenarioParams(**SCENARIOS[scenario_id].__dict__)
-                
+                    sim_manager.scenario_id = scenario_id
+                    sim_manager.params = ScenarioParams(**SCENARIOS[scenario_id].__dict__)
+
                 # Apply overrides
                 for key in ["waste_feed_kg_h", "moisture_pct", "plastic_ratio", "organic_ratio",
                            "airflow_m3_h", "reactor_temp_c", "pressure_kpa", "water_flow_kg_h",
                            "boiler_efficiency", "turbine_efficiency"]:
-                    if key in data:
-                        setattr(sim_manager.params[session_id], key, data[key])
-                
-                # Start simulation loop
-                asyncio.create_task(sim_manager.run_live(session_id))
-            
+                    if key in data and data[key] is not None:
+                        setattr(sim_manager.params, key, data[key])
+
+                sim_manager.running = True
+                sim_manager.start_background_loop()
+
             elif action == "pause":
-                sim_manager.running[session_id] = False
-            
+                sim_manager.running = False
+                await sim_manager.broadcast({"running": False, "tick": sim_manager.tick})
+
             elif action == "reset":
-                sim_manager.running[session_id] = False
-                sim_manager.params[session_id] = ScenarioParams()
-            
+                sim_manager.running = False
+                sim_manager.tick = 0
+                scenario_id = data.get("scenario_id", "normal")
+                if scenario_id in SCENARIOS:
+                    sim_manager.scenario_id = scenario_id
+                    sim_manager.params = ScenarioParams(**SCENARIOS[scenario_id].__dict__)
+                else:
+                    sim_manager.params = ScenarioParams()
+                sim_manager.last_result = None
+                await sim_manager.broadcast({"running": False, "tick": 0, "reset": True})
+
             elif action == "speed":
-                sim_manager.speed[session_id] = data.get("value", 1.0)
-            
+                sim_manager.speed = float(data.get("value", 1.0))
+
             elif action == "update_params":
                 for key in ["waste_feed_kg_h", "moisture_pct", "plastic_ratio", "organic_ratio",
-                           "airflow_m3_h", "reactor_temp_c", "pressure_kpa", "water_flow_kg_h"]:
-                    if key in data:
-                        setattr(sim_manager.params[session_id], key, data[key])
-            
+                           "airflow_m3_h", "reactor_temp_c", "pressure_kpa", "water_flow_kg_h",
+                           "boiler_efficiency", "turbine_efficiency"]:
+                    if key in data and data[key] is not None:
+                        setattr(sim_manager.params, key, data[key])
+
             elif action == "correct":
-                # Apply correction for demo
-                p = sim_manager.params[session_id]
+                # Demo correction logic
+                p = sim_manager.params
                 p.plastic_ratio = 0.20
                 p.airflow_m3_h = 130
                 p.reactor_temp_c = 860
-    
+
     except WebSocketDisconnect:
-        sim_manager.disconnect(session_id)
+        await sim_manager.disconnect(ws)
     except Exception as e:
-        print(f"WebSocket error: {e}")
-        sim_manager.disconnect(session_id)
+        print(f"WebSocket client error: {e}")
+        await sim_manager.disconnect(ws)
 
 
 # ── System Info ───────────────────────────────────────────────
@@ -545,20 +778,24 @@ async def websocket_simulation(ws: WebSocket):
 @app.get("/api/system")
 async def system_info():
     import platform
-    
+
     cuda_available = False
     try:
         import torch
         cuda_available = torch.cuda.is_available()
     except ImportError:
         pass
-    
+
+    hist_count = await count_history_records()
+
     return {
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "cuda_available": cuda_available,
         "anomaly_model_loaded": anomaly_predictor.loaded if anomaly_predictor else False,
-        "history_count": len(simulation_history),
+        "yolo_model_loaded": yolo_model_loaded,
+        "vit_model_loaded": vit_model_loaded,
+        "history_count": hist_count,
         "disclaimer": (
             "Engineering simulation prototype. Results are model-based approximations "
             "and are not a substitute for validated industrial process simulation, "
