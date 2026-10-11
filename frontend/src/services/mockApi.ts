@@ -235,8 +235,16 @@ export function generateSimulationResult(scenarioId: string = 'normal', customPa
       energy_closure_error_pct: 0.02,
     },
     whole_plant_closure: {
+      chemical_input_kw: Number((wasteFeed * 5.8).toFixed(1)),
+      net_electrical_power_kw: netPower,
+      district_heat_kw: heatRecovered,
+      unrecovered_condenser_heat_kw: 210.0,
+      reactor_wall_loss_kw: 28.0,
+      char_chemical_energy_kw: 45.0,
+      boiler_stack_loss_kw: 145.0,
+      syngas_sensible_stack_losses_kw: 145.0,
+      whole_plant_output_sum_kw: Number((netPower + heatRecovered + 210.0 + 28.0 + 45.0 + 145.0).toFixed(1)),
       closure_error_pct: 0.03,
-      status: 'VERIFIED',
     },
     overall: {
       waste_input_kw: wasteFeed * 5.8,
