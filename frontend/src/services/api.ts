@@ -1,5 +1,11 @@
-const API_BASE = '/api';
-const WS_BASE = `ws://${window.location.hostname}:8000`;
+const envApi = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.VITE_API_BASE;
+const envWs = (import.meta as any).env?.VITE_WS_URL || (import.meta as any).env?.VITE_WS_BASE;
+
+const API_BASE = envApi || '/api';
+const DEFAULT_WS = typeof window !== 'undefined'
+  ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000`
+  : 'ws://localhost:8000';
+const WS_BASE = envWs || DEFAULT_WS;
 
 export const api = {
   async get(path: string) {
@@ -25,9 +31,23 @@ export const api = {
   },
 };
 
-export function createSimulationSocket(onMessage: (data: any) => void) {
-  const ws = new WebSocket(`${WS_BASE}/ws/simulation`);
-  ws.onmessage = (e) => onMessage(JSON.parse(e.data));
-  ws.onerror = (e) => console.error('WebSocket error:', e);
-  return ws;
+export function createSimulationSocket(
+  onMessage: (data: any) => void,
+  onError?: (e: Event) => void,
+  onOpen?: (e: Event) => void
+) {
+  try {
+    const ws = new WebSocket(`${WS_BASE}/ws/simulation`);
+    ws.onmessage = (e) => onMessage(JSON.parse(e.data));
+    ws.onerror = (e) => {
+      console.warn('Simulation WebSocket unavailable:', e);
+      onError?.(e);
+    };
+    if (onOpen) ws.onopen = onOpen;
+    return ws;
+  } catch (err) {
+    console.warn('Simulation WebSocket init error:', err);
+    if (onError) onError(err as any);
+    return null;
+  }
 }

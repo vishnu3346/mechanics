@@ -34,13 +34,21 @@ const BASELINE_DATA = [
   { time: 4, temperature: 852, pressure: 8.59, power: 178.9, airflow: 662, heat: 863.7, efficiency: 39.9 },
 ]
 
+const DEFAULT_SCENARIOS: Scenario[] = [
+  { id: 'normal', name: 'Nominal Fluidized Operation (850°C, clean bed)', description: 'Nominal fluidized bed at 850 °C with clean sand' },
+  { id: 'plastic_surge', name: 'High Polymer Surge (Plastic 45%, agglomeration risk)', description: 'Surge of polymer plastics increasing bed agglomeration risk' },
+  { id: 'moisture_spike', name: 'Moisture Infiltration Spike (28% water)', description: 'High moisture feed dampening combustion zone' },
+  { id: 'defluidized', name: 'Defluidized Clinker Bed (Agglomerated sand)', description: 'Severe bed agglomeration causing defluidization risk' },
+]
+
 export default function SimulationPage() {
   const { resolvedTheme } = useTheme()
   const [running, setRunning] = useState(false)
   const [paused, setPaused] = useState(false)
   const [speed, setSpeed] = useState(1)
   const [scenario, setScenario] = useState('normal')
-  const [scenarios, setScenarios] = useState<Scenario[]>([])
+  const [scenarios, setScenarios] = useState<Scenario[]>(DEFAULT_SCENARIOS)
+  const [offlineDemoMode, setOfflineDemoMode] = useState(false)
   const [data, setData] = useState<SimulationResult | null>(null)
   const [chartData, setChartData] = useState<any[]>(BASELINE_DATA)
   const [selectedComponent, setSelectedComponent] = useState<string | null>(null)
@@ -75,6 +83,8 @@ export default function SimulationPage() {
 
   const wsRef = useRef<WebSocket | null>(null)
   const debounceTimerRef = useRef<any>(null)
+  const offlineTickerRef = useRef<any>(null)
+  const tickCounterRef = useRef<number>(0)
 
   // Fetch scenarios list
   useEffect(() => {
@@ -88,49 +98,177 @@ export default function SimulationPage() {
     }
   }, [data?.fluidization?.agglomeration_index])
 
+  // Client-Side Offline Demo Simulation Generator
+  const runOfflineTick = useCallback((aIndex: number, currentTick: number) => {
+    const d_p_eff = 0.0003 * (1 + 3.0 * aIndex)
+    const ratio = 10.05 / Math.pow(1 + 3.0 * aIndex, 1.8)
+    const isDefluidized = ratio < 1.0
+    const isBorderline = ratio >= 1.0 && ratio < 1.25
+
+    // Seeded/normal gaussian noise (0, 0.4)
+    const u1 = Math.max(1e-6, Math.random())
+    const u2 = Math.random()
+    const gauss = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2) * 0.4
+
+    const temp = 850 + gauss + (isDefluidized ? -25 : 0)
+    const pressureDrop = Number((8.58 * (1 - 0.45 * aIndex) + (Math.random() - 0.5) * 0.1).toFixed(2))
+    const power = Number((178.6 - aIndex * 45 + (Math.random() - 0.5) * 1.5).toFixed(1))
+    const heat = Number((863.1 - aIndex * 90 + (Math.random() - 0.5) * 2.5).toFixed(1))
+    const efficiency = Number((39.9 - aIndex * 12).toFixed(1))
+
+    const payload = ({
+      tick: currentTick,
+      sim_time_s: currentTick * 5,
+      running: true,
+      parameters: {
+        reactor_temp_c: Math.round(temp * 10) / 10,
+        waste_feed_kg_h: 500,
+        plastic_ratio: 0.25,
+        moisture_pct: 0.15,
+        airflow_m3_h: 661.0,
+        equivalence_ratio: 0.30,
+        pressure_bar: 1.05,
+      },
+      fluidization: {
+        d_p_eff: Number(d_p_eff.toFixed(6)),
+        u0_over_umf_eff: Number(ratio.toFixed(2)),
+        u0_m_s: 0.85,
+        umf_eff_m_s: Number((0.85 / ratio).toFixed(3)),
+        state: isDefluidized ? 'defluidized_agglomeration' : (isBorderline ? 'borderline_slugging' : 'bubbling_fluidized'),
+        physics_state: isDefluidized ? 'DEFLUIDIZATION_RISK' : 'NORMAL_FLUIDIZATION',
+        physics_risk_level: isDefluidized ? 'CRITICAL' : (isBorderline ? 'ELEVATED' : 'LOW'),
+        pressure_drop_kpa: pressureDrop,
+        agglomeration_index: aIndex,
+      },
+      turbine: {
+        net_electrical_power_kw: power,
+        electrical_power_kw: Number((power + 12).toFixed(1)),
+      },
+      heat_exchanger: {
+        recovered_heat_kw: heat,
+      },
+      overall: {
+        overall_efficiency_pct: efficiency,
+        electrical_efficiency_pct: 8.2,
+        thermal_efficiency_pct: 39.7,
+      },
+      anomaly: {
+        is_anomaly: isDefluidized,
+        physics_label: isDefluidized ? 'DEFLUIDIZATION_RISK' : 'NORMAL_FLUIDIZATION',
+        physics_risk_level: isDefluidized ? 'CRITICAL' : 'LOW',
+      },
+    } as unknown) as SimulationResult
+
+    setData(payload)
+    setChartData((prev) => {
+      const next = [
+        ...prev,
+        {
+          time: currentTick * 5,
+          temperature: payload.parameters?.reactor_temp_c,
+          pressure: pressureDrop,
+          power: power,
+          airflow: 661,
+          heat: heat,
+          efficiency: efficiency,
+        },
+      ]
+      return next.slice(-60)
+    })
+  }, [])
+
+  const startOfflineSimulation = useCallback(() => {
+    setOfflineDemoMode(true)
+    setRunning(true)
+    setPaused(false)
+    if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
+    runOfflineTick(agglomerationIndex, tickCounterRef.current)
+    offlineTickerRef.current = setInterval(() => {
+      tickCounterRef.current += 1
+      runOfflineTick(agglomerationIndex, tickCounterRef.current)
+    }, 1000 / speed)
+  }, [agglomerationIndex, speed, runOfflineTick])
+
   // WebSocket connection & lifecycle
   const handleStart = useCallback(() => {
     if (wsRef.current) wsRef.current.close()
-    const ws = createSimulationSocket((msg) => {
-      if (msg.running !== undefined) {
-        setData(msg)
-        if (msg.tick !== undefined) {
-          setChartData((prev) => {
-            const next = [
-              ...prev,
-              {
-                time: msg.sim_time_s ?? msg.tick * 5,
-                temperature: msg.parameters?.reactor_temp_c,
-                pressure: msg.fluidization?.pressure_drop_kpa ?? msg.anomaly?.features?.pressure_drop,
-                power: msg.turbine?.net_electrical_power_kw ?? msg.turbine?.electrical_power_kw,
-                airflow: msg.parameters?.airflow_m3_h,
-                heat: msg.heat_exchanger?.recovered_heat_kw,
-                efficiency: msg.overall?.overall_efficiency_pct,
-              },
-            ]
-            return next.slice(-60)
-          })
+    if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
+
+    let connected = false
+    const ws = createSimulationSocket(
+      (msg) => {
+        if (msg.running !== undefined) {
+          setData(msg)
+          if (msg.tick !== undefined) {
+            setChartData((prev) => {
+              const next = [
+                ...prev,
+                {
+                  time: msg.sim_time_s ?? msg.tick * 5,
+                  temperature: msg.parameters?.reactor_temp_c,
+                  pressure: msg.fluidization?.pressure_drop_kpa ?? msg.anomaly?.features?.pressure_drop,
+                  power: msg.turbine?.net_electrical_power_kw ?? msg.turbine?.electrical_power_kw,
+                  airflow: msg.parameters?.airflow_m3_h,
+                  heat: msg.heat_exchanger?.recovered_heat_kw,
+                  efficiency: msg.overall?.overall_efficiency_pct,
+                },
+              ]
+              return next.slice(-60)
+            })
+          }
         }
+      },
+      // onError:
+      () => {
+        if (!connected) {
+          console.info('Backend unavailable; starting client demo simulation.')
+          startOfflineSimulation()
+        }
+      },
+      // onOpen:
+      () => {
+        connected = true
+        setOfflineDemoMode(false)
+        ws?.send(JSON.stringify({ action: 'start', scenario_id: scenario, agglomeration_index: agglomerationIndex }))
+        setRunning(true)
+        setPaused(false)
       }
-    })
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ action: 'start', scenario_id: scenario, agglomeration_index: agglomerationIndex }))
-      setRunning(true)
-      setPaused(false)
-    }
+    )
+
+    // Fallback if WebSocket connection stalls or errors out
+    const timer = setTimeout(() => {
+      if (!connected && (!ws || ws.readyState !== WebSocket.OPEN)) {
+        console.info('WebSocket connection timed out; starting client demo simulation.')
+        startOfflineSimulation()
+      }
+    }, 1500)
+
     wsRef.current = ws
-  }, [scenario, agglomerationIndex])
+    return () => clearTimeout(timer)
+  }, [scenario, agglomerationIndex, speed, startOfflineSimulation])
 
   const handlePauseToggle = () => {
     if (!running) return
     const nextPaused = !paused
     setPaused(nextPaused)
+    if (offlineDemoMode) {
+      if (nextPaused) {
+        if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
+      } else {
+        offlineTickerRef.current = setInterval(() => {
+          tickCounterRef.current += 1
+          runOfflineTick(agglomerationIndex, tickCounterRef.current)
+        }, 1000 / speed)
+      }
+      return
+    }
     if (wsRef.current) {
       wsRef.current.send(JSON.stringify({ action: nextPaused ? 'pause' : 'start', scenario_id: scenario }))
     }
   }
 
   const handleReset = () => {
+    if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
     wsRef.current?.send(JSON.stringify({ action: 'reset' }))
     setRunning(false)
     setPaused(false)
@@ -138,16 +276,28 @@ export default function SimulationPage() {
     setChartData(BASELINE_DATA)
     setAgglomerationIndex(0.0)
     setMitigationNotice(null)
+    setOfflineDemoMode(false)
+    tickCounterRef.current = 0
   }
 
   const handleSpeed = (s: number) => {
     setSpeed(s)
+    if (offlineDemoMode && running && !paused) {
+      if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
+      offlineTickerRef.current = setInterval(() => {
+        tickCounterRef.current += 1
+        runOfflineTick(agglomerationIndex, tickCounterRef.current)
+      }, 1000 / s)
+    }
     wsRef.current?.send(JSON.stringify({ action: 'speed', value: s }))
   }
 
   // Debounced Agglomeration Slider Dispatch
   const handleAgglomerationChange = (val: number) => {
     setAgglomerationIndex(val)
+    if (offlineDemoMode && running && !paused) {
+      runOfflineTick(val, tickCounterRef.current)
+    }
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
     debounceTimerRef.current = setTimeout(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -158,6 +308,15 @@ export default function SimulationPage() {
 
   // Real Auto-Mitigate Action
   const handleAutoMitigate = () => {
+    if (offlineDemoMode) {
+      setAgglomerationIndex(0.0)
+      runOfflineTick(0.0, tickCounterRef.current)
+      setMitigationNotice(
+        'Mitigation Executed: Reset agglomerated bed (a -> 0.0), normalized plastic feed to 20%, restored ER=0.30 target airflow, bed temperature set to 850 °C.'
+      )
+      setTimeout(() => setMitigationNotice(null), 8000)
+      return
+    }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ action: 'correct' }))
       setAgglomerationIndex(0.0)
@@ -171,6 +330,7 @@ export default function SimulationPage() {
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+      if (offlineTickerRef.current) clearInterval(offlineTickerRef.current)
       wsRef.current?.close()
     }
   }, [])
@@ -203,6 +363,11 @@ export default function SimulationPage() {
             <h1 className="text-sm font-black tracking-tight font-mono text-slate-900 dark:text-white uppercase">
               Plant Process Simulator // 3D Live Console
             </h1>
+            {offlineDemoMode && (
+              <span className="px-2 py-0.5 text-[10px] font-mono rounded bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 font-semibold">
+                Client Demo Mode
+              </span>
+            )}
           </div>
           <div className="h-4 w-px bg-slate-300 dark:bg-white/15" />
           <select
